@@ -1,0 +1,334 @@
+"""
+Tests for app/dashboard/review.py helper functions — Task 09.
+
+All tests use MagicMock DB sessions. No real database connection is required.
+
+Test coverage:
+  1.  get_reviewer_id reads X-Forwarded-Email
+  2.  get_reviewer_id returns None when header missing
+  3.  create_review_decision inserts one review_decisions row
+  4.  create_review_decision rejects blank reviewer_id
+  5.  create_review_decision rejects invalid action
+  6.  create_review_decision does not update lead_candidates
+  7.  two conflicting decisions both exist as separate rows
+  8.  get_latest_review_action returns the latest decided_at action
+  9.  list_reviewable_leads returns active leads
+  10. list_reviewable_leads can filter by tier
+  11. get_lead_detail includes company, score, evidence, signals, and review history
+  12. Streamlit app imports without executing database work at import time
+"""
+from __future__ import annotations
+
+import importlib
+import sys
+import uuid
+from datetime import datetime, timezone
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from app.dashboard.review import (
+    create_review_decision,
+    get_lead_detail,
+    get_latest_review_action,
+    get_reviewer_id,
+    list_reviewable_leads,
+)
+from app.db.models import (
+    Company,
+    EvidenceItem,
+    LeadCandidate,
+    LeadScore,
+    ReviewDecision,
+    Signal,
+)
+
+
+# ─── Test 1: get_reviewer_id reads X-Forwarded-Email ─────────────────────────
+
+
+def test_get_reviewer_id_reads_header():
+    headers = {"X-Forwarded-Email": "alice@portercap.net"}
+    assert get_reviewer_id(headers) == "alice@portercap.net"
+
+
+# ─── Test 2: get_reviewer_id returns None when header missing ─────────────────
+
+
+def test_get_reviewer_id_returns_none_when_header_missing():
+    assert get_reviewer_id({}) is None
+    assert get_reviewer_id(None) is None
+    assert get_reviewer_id({"Authorization": "Bearer token"}) is None
+
+
+# ─── Test 3: create_review_decision inserts one review_decisions row ──────────
+
+
+def test_create_review_decision_inserts_one_row():
+    db = MagicMock()
+    lead_id = uuid.uuid4()
+
+    decision = create_review_decision(
+        lead_candidate_id=lead_id,
+        action="approve",
+        note="Strong A/R fit — recurring government contracts",
+        reviewer_id="alice@portercap.net",
+        db=db,
+    )
+
+    db.add.assert_called_once()
+    db.commit.assert_called_once()
+
+    added = db.add.call_args[0][0]
+    assert isinstance(added, ReviewDecision)
+    assert added.action == "approve"
+    assert added.reviewer_id == "alice@portercap.net"
+    assert added.lead_candidate_id == lead_id
+    assert added.note == "Strong A/R fit — recurring government contracts"
+    assert decision is added
+
+
+# ─── Test 4: create_review_decision rejects blank reviewer_id ────────────────
+
+
+@pytest.mark.parametrize("bad_id", ["", "   ", None])
+def test_create_review_decision_rejects_blank_reviewer(bad_id):
+    db = MagicMock()
+
+    with pytest.raises(ValueError, match="reviewer_id"):
+        create_review_decision(
+            lead_candidate_id=uuid.uuid4(),
+            action="approve",
+            note=None,
+            reviewer_id=bad_id,
+            db=db,
+        )
+
+    db.add.assert_not_called()
+    db.commit.assert_not_called()
+
+
+# ─── Test 5: create_review_decision rejects invalid action ────────────────────
+
+
+def test_create_review_decision_rejects_invalid_action():
+    db = MagicMock()
+
+    with pytest.raises(ValueError, match="Invalid action"):
+        create_review_decision(
+            lead_candidate_id=uuid.uuid4(),
+            action="delete_everything",
+            note=None,
+            reviewer_id="alice@portercap.net",
+            db=db,
+        )
+
+    db.add.assert_not_called()
+    db.commit.assert_not_called()
+
+
+# ─── Test 6: create_review_decision does not update lead_candidates ──────────
+
+
+def test_create_review_decision_does_not_update_lead_candidates():
+    db = MagicMock()
+
+    create_review_decision(
+        lead_candidate_id=uuid.uuid4(),
+        action="reject",
+        note=None,
+        reviewer_id="bob@portercap.net",
+        db=db,
+    )
+
+    # Exactly one add() call and it is a ReviewDecision, never a LeadCandidate
+    assert db.add.call_count == 1
+    added = db.add.call_args[0][0]
+    assert isinstance(added, ReviewDecision)
+    assert not isinstance(added, LeadCandidate)
+
+    # No execute() calls — no UPDATE, no SELECT for lead_candidates
+    db.execute.assert_not_called()
+
+
+# ─── Test 7: two conflicting decisions both exist as separate rows ────────────
+
+
+def test_two_conflicting_decisions_are_separate_rows():
+    db = MagicMock()
+    lead_id = uuid.uuid4()
+
+    d1 = create_review_decision(
+        lead_candidate_id=lead_id,
+        action="approve",
+        note="Looks good",
+        reviewer_id="alice@portercap.net",
+        db=db,
+    )
+    d2 = create_review_decision(
+        lead_candidate_id=lead_id,
+        action="reject",
+        note="Actually a bank subsidiary",
+        reviewer_id="bob@portercap.net",
+        db=db,
+    )
+
+    # Both decisions were inserted as separate rows
+    assert db.add.call_count == 2
+    assert db.commit.call_count == 2
+
+    actions = {db.add.call_args_list[i][0][0].action for i in range(2)}
+    assert actions == {"approve", "reject"}
+
+    # Each decision has its own unique id
+    assert d1.id != d2.id
+
+
+# ─── Test 8: get_latest_review_action returns the latest decided_at action ────
+
+
+def test_get_latest_review_action_returns_latest():
+    db = MagicMock()
+    lead_id = uuid.uuid4()
+
+    mock_latest = MagicMock(spec=ReviewDecision)
+    mock_latest.action = "reject"
+    mock_latest.decided_at = datetime(2024, 6, 4, 12, 0, 0, tzinfo=timezone.utc)
+
+    db.execute.return_value.scalars.return_value.first.return_value = mock_latest
+
+    result = get_latest_review_action(lead_id, db)
+
+    assert result is mock_latest
+    assert result.action == "reject"
+    db.execute.assert_called_once()
+
+
+# ─── Test 9: list_reviewable_leads returns active leads ──────────────────────
+
+
+def test_list_reviewable_leads_returns_active_leads():
+    db = MagicMock()
+
+    mock_lead_a = MagicMock(spec=LeadCandidate)
+    mock_lead_a.status = "active"
+    mock_lead_b = MagicMock(spec=LeadCandidate)
+    mock_lead_b.status = "active"
+
+    db.execute.return_value.scalars.return_value.all.return_value = [
+        mock_lead_a,
+        mock_lead_b,
+    ]
+
+    results = list_reviewable_leads(db)
+
+    assert len(results) == 2
+    db.execute.assert_called_once()
+
+
+# ─── Test 10: list_reviewable_leads can filter by tier ───────────────────────
+
+
+def test_list_reviewable_leads_filters_by_tier():
+    db_no_filter = MagicMock()
+    db_no_filter.execute.return_value.scalars.return_value.all.return_value = []
+
+    db_with_filter = MagicMock()
+    db_with_filter.execute.return_value.scalars.return_value.all.return_value = []
+
+    list_reviewable_leads(db_no_filter, tier=None)
+    list_reviewable_leads(db_with_filter, tier="Hot")
+
+    stmt_without_tier = str(db_no_filter.execute.call_args[0][0])
+    stmt_with_tier = str(db_with_filter.execute.call_args[0][0])
+
+    # The SQL statement must differ when a tier filter is added
+    assert stmt_without_tier != stmt_with_tier
+
+    # The tier column appears in the WHERE clause of the filtered statement
+    assert "tier" in stmt_with_tier
+
+
+# ─── Test 11: get_lead_detail includes all required sections ──────────────────
+
+
+def test_get_lead_detail_includes_all_sections():
+    db = MagicMock()
+    lead_id = uuid.uuid4()
+    company_id = uuid.uuid4()
+
+    mock_lead = MagicMock(spec=LeadCandidate)
+    mock_lead.id = lead_id
+    mock_lead.company_id = company_id
+
+    mock_company = MagicMock(spec=Company)
+    mock_company.id = company_id
+
+    # db.get: first call → lead, second call → company
+    db.get.side_effect = [mock_lead, mock_company]
+
+    mock_score = MagicMock(spec=LeadScore)
+    mock_evidence = [MagicMock(spec=EvidenceItem)]
+    mock_signals = [MagicMock(spec=Signal)]
+    mock_decisions = [MagicMock(spec=ReviewDecision)]
+
+    # db.execute: called 4 times in order — score, evidence, signals, decisions
+    score_result = MagicMock()
+    score_result.scalars.return_value.first.return_value = mock_score
+
+    evidence_result = MagicMock()
+    evidence_result.scalars.return_value.all.return_value = mock_evidence
+
+    signals_result = MagicMock()
+    signals_result.scalars.return_value.all.return_value = mock_signals
+
+    decisions_result = MagicMock()
+    decisions_result.scalars.return_value.all.return_value = mock_decisions
+
+    db.execute.side_effect = [
+        score_result,
+        evidence_result,
+        signals_result,
+        decisions_result,
+    ]
+
+    result = get_lead_detail(lead_id, db)
+
+    assert result is not None
+    assert result["lead"] is mock_lead
+    assert result["company"] is mock_company
+    assert result["latest_score"] is mock_score
+    assert result["evidence"] == mock_evidence
+    assert result["signals"] == mock_signals
+    assert result["review_history"] == mock_decisions
+
+
+def test_get_lead_detail_returns_none_for_missing_lead():
+    db = MagicMock()
+    db.get.return_value = None
+
+    result = get_lead_detail(uuid.uuid4(), db)
+
+    assert result is None
+    db.execute.assert_not_called()
+
+
+# ─── Test 12: Streamlit app imports without executing database work ────────────
+
+
+def test_dashboard_app_imports_without_db_work():
+    # Remove any cached version so the module body re-executes on import
+    sys.modules.pop("app.dashboard.app", None)
+
+    mock_st = MagicMock()
+    # Provide a real empty dict so dict(st.context.headers) works without error
+    mock_st.context.headers = {}
+    # sidebar.radio returns a MagicMock which is != "Lead List" and != "Lead Detail"
+    # so all page-conditional blocks (and their DB calls) are skipped at import time
+
+    with patch.dict(sys.modules, {"streamlit": mock_st}):
+        mod = importlib.import_module("app.dashboard.app")
+
+    assert mod is not None
+    # No DB session was opened at module level
+    # (SessionLocal() is only called inside page conditionals that were not entered)

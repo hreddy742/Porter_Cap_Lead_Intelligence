@@ -1,0 +1,50 @@
+version: "3.9"
+
+services:
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: porter_leads
+      POSTGRES_USER: porter
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localdev}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U porter -d porter_leads"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  app:
+    build: .
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - .:/app           # mount source for development
+    command: python -m scripts.run_pipeline
+
+  dashboard:
+    build: .
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8501:8501"      # Streamlit default port
+    volumes:
+      - .:/app
+    command: streamlit run app/dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+
+volumes:
+  postgres_data:
+
+# Usage:
+#   Start DB only (local dev):       docker compose up db -d
+#   Start everything:                docker compose up -d
+#   Run pipeline manually:           docker compose run --rm app python -m scripts.run_pipeline
+#   Run migrations:                  docker compose run --rm app alembic upgrade head
+#   Run tests:                       docker compose run --rm app pytest
