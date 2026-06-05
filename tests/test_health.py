@@ -135,7 +135,8 @@ def test_no_runs_returns_has_runs_false():
     assert result["sources_total"] == 0
     assert result["sources_succeeded"] == 0
     assert result["sources_failed"] == 0
-    assert result["raw_events_processed"] is None
+    assert result["records_fetched"] is None
+    assert result["raw_events_stored"] is None
     assert result["evidence_items_created"] is None
     assert result["companies_resolved"] is None
     assert result["signals_created"] is None

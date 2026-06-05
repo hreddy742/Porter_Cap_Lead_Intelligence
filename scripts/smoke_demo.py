@@ -91,26 +91,33 @@ def _sha256_dict(d: dict) -> str:
 # ── Idempotent setup helpers ───────────────────────────────────────────────────
 
 def _ensure_source_registry(db: Session):
-    """Return existing or newly created demo source_registry row."""
+    """Return existing or newly created demo source_registry row.
+
+    The demo source is intentionally NOT enabled so that it does not appear in
+    real pipeline runs (orchestrator only processes enabled sources).
+    status='planned' + enabled=False is the correct state for a demo-only source.
+    """
     from app.db.models import SourceRegistry
 
     existing = db.execute(
         select(SourceRegistry).where(SourceRegistry.name == DEMO_SOURCE_NAME)
     ).scalar_one_or_none()
     if existing:
+        # Ensure existing demo row is not accidentally enabled from a previous
+        # version of this script that set enabled=True.
+        if existing.enabled:
+            existing.enabled = False
+            existing.status = "planned"
+            db.flush()
         return existing
 
     source = SourceRegistry(
         name=DEMO_SOURCE_NAME,
         category="federal_contracts",
         access_method="api",
-        status="enabled",
-        enabled=True,
+        status="planned",
+        enabled=False,
         cost_type="free",
-        legal_notes=(
-            "Demo-only source — local smoke testing.  "
-            "This source never calls the real USASpending API."
-        ),
         signal_types=["CONTRACT_AWARD"],
         base_url="https://api.usaspending.gov",
         quality_score=Decimal("0.90"),
@@ -405,10 +412,10 @@ def main() -> int:
 
         # ── Commit ─────────────────────────────────────────────────────────────
         db.commit()
-        print("\n      ✓ Transaction committed.")
+        print("\n      [OK] Transaction committed.")
 
         # ── [8] CSV export (reads committed data) ─────────────────────────────
-        print(f"\n[8/8] Exporting approved leads → {DEMO_CSV_PATH} ...")
+        print(f"\n[8/8] Exporting approved leads -> {DEMO_CSV_PATH} ...")
         export_result = export_approved_leads_csv(DEMO_CSV_PATH, db)
         print(f"      exported_count        = {export_result['exported_count']}")
         print(f"      skipped_count         = {export_result['skipped_count']}")

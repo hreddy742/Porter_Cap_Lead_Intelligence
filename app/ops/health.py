@@ -38,7 +38,8 @@ def get_latest_pipeline_health(db: Session) -> dict:
             "sources_total": 0,
             "sources_succeeded": 0,
             "sources_failed": 0,
-            "raw_events_processed": None,
+            "records_fetched": None,
+            "raw_events_stored": None,
             "evidence_items_created": None,
             "companies_resolved": None,
             "signals_created": None,
@@ -60,7 +61,11 @@ def get_latest_pipeline_health(db: Session) -> dict:
     sources_total = len(source_runs)
     sources_succeeded = sum(1 for sr in source_runs if sr.status == "completed")
     sources_failed = sum(1 for sr in source_runs if sr.status == "failed")
-    raw_events_processed = sum((sr.records_fetched or 0) for sr in source_runs)
+    # records_fetched = total API records received (includes quarantined + skipped)
+    # records_valid   = new records actually stored (what the orchestrator processes)
+    # Expose both so callers can see true pipeline throughput vs API call volume.
+    records_fetched = sum((sr.records_fetched or 0) for sr in source_runs)
+    raw_events_stored = sum((sr.records_valid or 0) for sr in source_runs)
 
     errors = [
         {
@@ -84,8 +89,9 @@ def get_latest_pipeline_health(db: Session) -> dict:
         "sources_total": sources_total,
         "sources_succeeded": sources_succeeded,
         "sources_failed": sources_failed,
-        "raw_events_processed": raw_events_processed,
-        "evidence_items_created": None,
+        "records_fetched": records_fetched,      # total API records received this run
+        "raw_events_stored": raw_events_stored,  # new records stored (after dedup + quarantine)
+        "evidence_items_created": None,          # not tracked in source_runs; use orchestrator summary
         "companies_resolved": None,
         "signals_created": None,
         "companies_scored": None,
@@ -140,6 +146,8 @@ def get_source_health(db: Session) -> list[dict]:
                     "status": sr.status,
                     "records_fetched": getattr(sr, "records_fetched", None),
                     "records_valid": getattr(sr, "records_valid", None),
+                    "records_skipped": getattr(sr, "records_skipped", None),
+                    "quarantine_count": getattr(sr, "quarantine_count", None),
                     "error_text": sr.error_text,
                 }
                 for sr in recent_runs
