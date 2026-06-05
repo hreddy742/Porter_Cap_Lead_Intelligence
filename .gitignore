@@ -41,3 +41,6 @@ alembic/versions/__pycache__/
 # Logs
 *.log
 logs/
+
+# Exports — keep directory tracked, ignore generated CSVs
+exports/*.csv
