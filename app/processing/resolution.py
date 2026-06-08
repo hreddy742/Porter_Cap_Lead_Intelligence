@@ -121,6 +121,8 @@ def resolve_company_for_evidence(evidence_id: UUID, db: Session) -> Company | No
     state_entity_id = _str_or_none(fields.get("state_entity_id"))
     state_raw = _str_or_none(fields.get("state_code"))
     state = state_raw.upper() if state_raw else None
+    naics_code = _str_or_none(fields.get("naics_code"))
+    naics_description = _str_or_none(fields.get("naics_description"))
 
     # Hard-ID matching: UEI → domain → state_entity_id (first match wins)
     company: Company | None = None
@@ -132,6 +134,11 @@ def resolve_company_for_evidence(evidence_id: UUID, db: Session) -> Company | No
         company = _find_by_hard_id("state_entity_id", state_entity_id, db)
 
     if company is not None:
+        # Fill null NAICS fields if evidence provides them — never overwrite existing data.
+        if not company.naics_code and naics_code:
+            company.naics_code = naics_code
+        if not company.naics_description and naics_description:
+            company.naics_description = naics_description
         evidence.company_id = company.id
         db.flush()
         log.info("resolution_matched_existing", company_id=str(company.id))
@@ -144,6 +151,8 @@ def resolve_company_for_evidence(evidence_id: UUID, db: Session) -> Company | No
         normalized_name=normalized_name,
         external_id=external_id,
         state=state,
+        naics_code=naics_code,
+        naics_description=naics_description,
     )
     db.add(company)
     db.flush()  # Assigns company.id before creating dependent rows

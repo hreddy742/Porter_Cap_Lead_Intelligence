@@ -28,6 +28,8 @@ def _make_evidence(
     domain: str | None = None,
     state_entity_id: str | None = None,
     state_code: str = "VA",
+    naics_code: str | None = None,
+    naics_description: str | None = None,
 ) -> MagicMock:
     ev = MagicMock(spec=EvidenceItem)
     ev.id = uuid.uuid4()
@@ -38,6 +40,8 @@ def _make_evidence(
         "domain": domain,
         "state_entity_id": state_entity_id,
         "state_code": state_code,
+        "naics_code": naics_code,
+        "naics_description": naics_description,
     }
     return ev
 
@@ -265,3 +269,81 @@ def test_missing_company_name_returns_none_without_crash():
 
     assert result is None
     assert len(db._added) == 0, "must not add any DB rows when company_name is missing"
+
+
+# ─── Tests 8–11: NAICS mapping ────────────────────────────────────────────────
+
+
+def test_new_company_gets_naics_code_from_evidence():
+    """New company created from evidence receives naics_code and naics_description."""
+    ev = _make_evidence(
+        naics_code="541511",
+        naics_description="Custom Computer Programming Services",
+    )
+    db = _make_session(evidence=ev)
+
+    result = resolve_company_for_evidence(ev.id, db)
+
+    assert result is not None
+    companies = [o for o in db._added if isinstance(o, Company)]
+    assert len(companies) == 1
+    assert companies[0].naics_code == "541511"
+    assert companies[0].naics_description == "Custom Computer Programming Services"
+
+
+def test_existing_company_null_naics_gets_filled_from_evidence():
+    """Existing company with NULL naics_code is updated when evidence provides one."""
+    existing_company = Company(
+        id=uuid.uuid4(),
+        canonical_name="Acme Federal Services",
+        normalized_name="acme federal services",
+        state="VA",
+        naics_code=None,
+    )
+    identifier_mock = MagicMock()
+    identifier_mock.company_id = existing_company.id
+
+    ev = _make_evidence(uei="UEI123456789", naics_code="541511")
+    db = _make_session(evidence=ev, identifier=identifier_mock, company=existing_company)
+
+    result = resolve_company_for_evidence(ev.id, db)
+
+    assert result is existing_company
+    assert existing_company.naics_code == "541511", (
+        "null naics_code must be filled when evidence provides one"
+    )
+
+
+def test_existing_company_non_null_naics_not_overwritten():
+    """Existing company with a non-null naics_code is never overwritten by new evidence."""
+    existing_company = Company(
+        id=uuid.uuid4(),
+        canonical_name="Acme Federal Services",
+        normalized_name="acme federal services",
+        state="VA",
+        naics_code="336411",  # already set
+    )
+    identifier_mock = MagicMock()
+    identifier_mock.company_id = existing_company.id
+
+    ev = _make_evidence(uei="UEI123456789", naics_code="541511")  # different NAICS
+    db = _make_session(evidence=ev, identifier=identifier_mock, company=existing_company)
+
+    resolve_company_for_evidence(ev.id, db)
+
+    assert existing_company.naics_code == "336411", (
+        "existing non-null naics_code must never be overwritten"
+    )
+
+
+def test_evidence_without_naics_resolves_normally():
+    """Evidence with no naics_code still resolves to a Company without crashing."""
+    ev = _make_evidence()  # naics_code=None by default
+    db = _make_session(evidence=ev)
+
+    result = resolve_company_for_evidence(ev.id, db)
+
+    assert result is not None
+    companies = [o for o in db._added if isinstance(o, Company)]
+    assert len(companies) == 1
+    assert companies[0].naics_code is None, "naics_code must be None when evidence has none"

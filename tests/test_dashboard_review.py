@@ -332,3 +332,144 @@ def test_dashboard_app_imports_without_db_work():
     assert mod is not None
     # No DB session was opened at module level
     # (SessionLocal() is only called inside page conditionals that were not entered)
+
+
+# ─── Test 13: scored leads with research status are returned ──────────────────
+
+
+def test_list_reviewable_leads_returns_scored_research_leads():
+    """
+    Leads created by score_company (status='active', sales_status='research',
+    current_score set, tier set) are returned by list_reviewable_leads.
+    The query must NOT filter on sales_status or require a non-null current_score
+    — those fields are display-only, not query predicates.
+    """
+    db = MagicMock()
+
+    mock_lead = MagicMock(spec=LeadCandidate)
+    mock_lead.status = "active"
+    mock_lead.sales_status = "research"
+    mock_lead.current_score = 23
+    mock_lead.tier = "cold"
+
+    db.execute.return_value.scalars.return_value.all.return_value = [mock_lead]
+
+    results = list_reviewable_leads(db)
+
+    assert len(results) == 1
+    assert results[0].status == "active"
+    assert results[0].sales_status == "research"
+    assert results[0].current_score == 23
+    assert results[0].tier == "cold"
+
+
+# ─── Test 14: query does not filter out valid leads on extra predicates ────────
+
+
+def test_list_reviewable_leads_no_extra_filter_on_valid_leads():
+    """
+    The WHERE clause only uses status='active' and company.deleted_at IS NULL.
+    It must NOT filter by sales_status, tier, or current_score — those would
+    silently hide newly-scored leads that haven't been reviewed yet.
+    """
+    db = MagicMock()
+    db.execute.return_value.scalars.return_value.all.return_value = []
+
+    list_reviewable_leads(db)
+
+    stmt_str = str(db.execute.call_args[0][0]).lower()
+
+    # Must filter on status (for active leads)
+    assert "status" in stmt_str
+    # Must NOT have an equality predicate on sales_status or current_score.
+    # These columns appear in the SELECT list but must never appear in WHERE.
+    assert "sales_status =" not in stmt_str
+    assert "current_score =" not in stmt_str
+
+
+# ─── Test 15: company attribute accessible without live session ───────────────
+
+
+def test_list_reviewable_leads_company_accessible_after_session_close():
+    """
+    list_reviewable_leads uses joinedload(LeadCandidate.company), so the
+    company relationship is populated inside the session.  Accessing
+    lead.company (and lead.company.canonical_name) after the session closes
+    must not raise DetachedInstanceError.
+
+    This test simulates the post-session access that the Streamlit Lead List
+    loop performs:  company_name = lead.company.canonical_name if lead.company else ...
+    """
+    db = MagicMock()
+
+    mock_company = MagicMock(spec=Company)
+    mock_company.canonical_name = "Acme Federal Services"
+
+    mock_lead = MagicMock(spec=LeadCandidate)
+    mock_lead.status = "active"
+    mock_lead.company = mock_company  # joinedload pre-populates this before session closes
+
+    db.execute.return_value.scalars.return_value.all.return_value = [mock_lead]
+
+    results = list_reviewable_leads(db)
+
+    # Simulate what app.py does after the `with SessionLocal()` block exits
+    company_name = (
+        results[0].company.canonical_name if results[0].company else "unknown"
+    )
+    assert company_name == "Acme Federal Services"
+
+
+# ─── Test 16: Lead Detail exposes evidence source_url as a deep link ──────────
+
+
+def test_get_lead_detail_evidence_exposes_deep_link_source_url():
+    """
+    Evidence items in the lead detail must carry a non-homepage source_url so
+    the dashboard can render a working evidence link.
+    """
+    db = MagicMock()
+    lead_id = uuid.uuid4()
+    company_id = uuid.uuid4()
+
+    mock_lead = MagicMock(spec=LeadCandidate)
+    mock_lead.id = lead_id
+    mock_lead.company_id = company_id
+
+    mock_company = MagicMock(spec=Company)
+    mock_company.id = company_id
+
+    db.get.side_effect = [mock_lead, mock_company]
+
+    mock_ev = MagicMock(spec=EvidenceItem)
+    mock_ev.source_url = (
+        "https://www.usaspending.gov/award/CONT_AWD_TEST_9700_-NONE-_-NONE-/"
+    )
+    mock_ev.claim_supported = "CONTRACT_AWARD"
+
+    score_result = MagicMock()
+    score_result.scalars.return_value.first.return_value = None
+    evidence_result = MagicMock()
+    evidence_result.scalars.return_value.all.return_value = [mock_ev]
+    signals_result = MagicMock()
+    signals_result.scalars.return_value.all.return_value = []
+    decisions_result = MagicMock()
+    decisions_result.scalars.return_value.all.return_value = []
+
+    db.execute.side_effect = [
+        score_result,
+        evidence_result,
+        signals_result,
+        decisions_result,
+    ]
+
+    detail = get_lead_detail(lead_id, db)
+
+    evidence = detail["evidence"]
+    assert len(evidence) == 1
+    url = evidence[0].source_url
+    assert url is not None
+    assert url.strip("/") != "https://www.usaspending.gov", (
+        "evidence source_url must not be the homepage"
+    )
+    assert "CONT_AWD" in url, "evidence source_url must contain the award key"

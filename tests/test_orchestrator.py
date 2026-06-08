@@ -354,6 +354,36 @@ def test_summary_counts_correct_for_two_events():
     assert result["companies_scored"] == 2
 
 
+# ─── Test 12b: gated company (scored=False) does not increment companies_scored ─
+
+
+def test_gated_company_not_counted_in_companies_scored():
+    """
+    score_company returns {"scored": False} for gated companies. The orchestrator
+    must NOT increment companies_scored in that case — otherwise the summary
+    misleads callers into thinking leads were persisted when gates blocked them.
+    """
+    source = _make_source("usaspending")
+    raw_event = _make_raw_event()
+    evidence = _make_evidence()
+    company = _make_company()
+
+    with patch(_LOAD_SOURCES, return_value=[source]), \
+         patch(_GET_EVENTS, return_value=[raw_event]), \
+         patch(_CONNECTOR, return_value=MagicMock()), \
+         patch(_EXTRACT, return_value=[evidence]), \
+         patch(_RESOLVE, return_value=company), \
+         patch(_SIGNALS, return_value=[_make_signal()]), \
+         patch(_SCORE, return_value={"scored": False}):
+        result = run_pipeline(_make_db())
+
+    assert result["companies_scored"] == 0, (
+        "gated company must not be counted in companies_scored"
+    )
+    assert result["companies_resolved"] == 1  # resolution still ran
+    assert result["signals_created"] == 1     # signals still ran
+
+
 # ─── Test 12: no real HTTP/API call is made ───────────────────────────────────
 
 

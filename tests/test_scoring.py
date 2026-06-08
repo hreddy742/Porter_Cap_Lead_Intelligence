@@ -464,3 +464,48 @@ def test_lead_candidate_row_created_for_scored_company(mock_gates):
     assert candidates[0].gate_result == "passed"
     assert candidates[0].current_score == result["total_score"]
     assert candidates[0].tier == result["tier"]
+
+
+# ─── Tests 17–18: NAICS code effect on scoring ────────────────────────────────
+
+
+@patch("app.processing.scoring.evaluate_mandatory_gates")
+def test_ar_heavy_naics_gives_full_naics_porter_fit_points(mock_gates):
+    """company.naics_code in an AR-heavy prefix gives porter_fit the +15 NAICS bonus."""
+    mock_gates.return_value = _GATE_PASSED
+
+    # NAICS 541330 starts with "54" → AR-heavy.  Award $1M (in $250K–$10M range).
+    # Expected porter_fit = 15 (NAICS) + 5 (US country) + 5 (award range) = 25.
+    company = _make_company(naics_code="541330", country="US")
+    cfg = _make_scoring_config()
+    ev = _make_evidence()
+    signal = _make_signal(freshness_score=0.85, award_amount=1_000_000, evidence_id=ev.id)
+
+    db = _clean_session(company, cfg, [ev], [signal])
+    result = score_company(company.id, db)
+
+    pf = result["component_breakdown"]["porter_fit"]
+    assert pf["points"] == 25, (
+        f"AR-heavy NAICS should give porter_fit=25, got {pf['points']}"
+    )
+
+
+@patch("app.processing.scoring.evaluate_mandatory_gates")
+def test_null_naics_code_gives_zero_naics_porter_fit_bonus(mock_gates):
+    """company.naics_code = None → no NAICS bonus; porter_fit is limited to country + award points."""
+    mock_gates.return_value = _GATE_PASSED
+
+    # No NAICS.  Award $1M (in range).  Country US.
+    # Expected porter_fit = 0 (no NAICS) + 5 (US) + 5 (award range) = 10.
+    company = _make_company(naics_code=None, country="US")
+    cfg = _make_scoring_config()
+    ev = _make_evidence()
+    signal = _make_signal(freshness_score=0.85, award_amount=1_000_000, evidence_id=ev.id)
+
+    db = _clean_session(company, cfg, [ev], [signal])
+    result = score_company(company.id, db)
+
+    pf = result["component_breakdown"]["porter_fit"]
+    assert pf["points"] == 10, (
+        f"Null NAICS should give porter_fit=10 (country+award only), got {pf['points']}"
+    )

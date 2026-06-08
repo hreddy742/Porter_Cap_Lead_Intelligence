@@ -9,6 +9,14 @@ by Caddy after OAuth authentication. The user is never asked to type their email
 If the header is absent (local dev without Caddy), review actions are disabled.
 """
 
+import pathlib
+import sys
+
+# Streamlit adds the script's directory (app/dashboard/) to sys.path, which makes
+# the file "app.py" shadow the "app" package. Insert the project root first so
+# Python resolves "app" as the package directory, not this file.
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent.parent))
+
 import uuid
 
 import streamlit as st
@@ -49,7 +57,7 @@ st.title("Porter Capital — Lead Intelligence")
 
 # ── Lead List ──────────────────────────────────────────────────────────────────
 if page == "Lead List":
-    tier_options = ["All", "Hot", "Warm", "Cold", "Archive"]
+    tier_options = ["All", "hot", "warm", "cold", "archive"]
     selected_tier = st.sidebar.selectbox("Filter by Tier", tier_options)
     tier_filter = None if selected_tier == "All" else selected_tier
 
