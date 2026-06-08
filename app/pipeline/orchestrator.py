@@ -116,6 +116,15 @@ def _execute_source(
                 score_result = score_company(company.id, db)
                 if score_result["scored"]:
                     summary["companies_scored"] += 1
+                    tier = score_result.get("tier")
+                    if tier == "hot":
+                        summary["total_hot"] += 1
+                    elif tier == "warm":
+                        summary["total_warm"] += 1
+                    elif tier == "cold":
+                        summary["total_cold"] += 1
+                    elif tier == "archive":
+                        summary["total_archive"] += 1
 
         # ── Step 4: mark source completed ─────────────────────────────────────
         source_run.status = "completed"
@@ -196,6 +205,11 @@ def run_pipeline(db: Session) -> dict:
         "companies_resolved": 0,
         "signals_created": 0,
         "companies_scored": 0,
+        "total_hot": 0,
+        "total_warm": 0,
+        "total_cold": 0,
+        "total_archive": 0,
+        "quarantine_count": 0,
         "errors": [],
     }
 
@@ -211,6 +225,7 @@ def run_pipeline(db: Session) -> dict:
         db.commit()
 
         _execute_source(source, source_run, db, summary)
+        summary["quarantine_count"] += source_run.quarantine_count or 0
 
     # ── Determine final pipeline status ───────────────────────────────────────
     if summary["sources_total"] == 0 or summary["sources_failed"] == 0:
@@ -223,6 +238,11 @@ def run_pipeline(db: Session) -> dict:
     pipeline_run.status = final_status
     pipeline_run.ended_at = _utcnow()
     pipeline_run.total_records = summary["raw_events_processed"]
+    pipeline_run.total_hot = summary["total_hot"]
+    pipeline_run.total_warm = summary["total_warm"]
+    pipeline_run.total_cold = summary["total_cold"]
+    pipeline_run.total_archive = summary["total_archive"]
+    pipeline_run.quarantine_count = summary["quarantine_count"]
     if summary["errors"]:
         pipeline_run.error_summary = "; ".join(e["error"] for e in summary["errors"])
 

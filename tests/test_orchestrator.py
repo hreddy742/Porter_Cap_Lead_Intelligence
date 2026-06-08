@@ -17,6 +17,12 @@ Test coverage:
   10. pipeline_run.status updated at the end
   11. Summary counts correct for a simple 2-event run
   12. No real HTTP/API call is made (connector is always mocked)
+  13. warm scored lead increments total_warm on pipeline_run
+  14. cold scored lead increments total_cold on pipeline_run
+  15. hot scored lead increments total_hot on pipeline_run
+  16. archive scored lead increments total_archive on pipeline_run
+  17. gated (scored=False) lead does not increment any tier counter
+  18. quarantine_count from source_run is persisted to pipeline_run
 """
 from __future__ import annotations
 
@@ -404,3 +410,132 @@ def test_no_real_http_call_is_made():
     mock_cls.assert_called_once()
     # run() was called on the instance
     mock_cls.return_value.run.assert_called_once()
+
+
+# ─── Helpers for tier counter tests ──────────────────────────────────────────
+
+
+def _run_with_tier(tier: str):
+    """Run pipeline with a single event that scores to the given tier. Returns (result, pipeline_run_obj)."""
+    source = _make_source("usaspending")
+    raw_event = _make_raw_event()
+    evidence = _make_evidence()
+    company = _make_company()
+    db = _make_db()
+
+    with patch(_LOAD_SOURCES, return_value=[source]), \
+         patch(_GET_EVENTS, return_value=[raw_event]), \
+         patch(_CONNECTOR, return_value=MagicMock()), \
+         patch(_EXTRACT, return_value=[evidence]), \
+         patch(_RESOLVE, return_value=company), \
+         patch(_SIGNALS, return_value=[_make_signal()]), \
+         patch(_SCORE, return_value={"scored": True, "tier": tier}):
+        result = run_pipeline(db)
+
+    pipeline_run_obj = _find_added_obj(db, PipelineRun)
+    return result, pipeline_run_obj
+
+
+# ─── Test 13: warm lead increments total_warm ─────────────────────────────────
+
+
+def test_warm_lead_increments_total_warm():
+    result, pr = _run_with_tier("warm")
+    assert result["total_warm"] == 1
+    assert result["total_hot"] == 0
+    assert result["total_cold"] == 0
+    assert result["total_archive"] == 0
+    assert pr.total_warm == 1
+    assert pr.total_hot == 0
+
+
+# ─── Test 14: cold lead increments total_cold ─────────────────────────────────
+
+
+def test_cold_lead_increments_total_cold():
+    result, pr = _run_with_tier("cold")
+    assert result["total_cold"] == 1
+    assert result["total_warm"] == 0
+    assert result["total_hot"] == 0
+    assert result["total_archive"] == 0
+    assert pr.total_cold == 1
+
+
+# ─── Test 15: hot lead increments total_hot ───────────────────────────────────
+
+
+def test_hot_lead_increments_total_hot():
+    result, pr = _run_with_tier("hot")
+    assert result["total_hot"] == 1
+    assert result["total_warm"] == 0
+    assert result["total_cold"] == 0
+    assert result["total_archive"] == 0
+    assert pr.total_hot == 1
+
+
+# ─── Test 16: archive lead increments total_archive ──────────────────────────
+
+
+def test_archive_lead_increments_total_archive():
+    result, pr = _run_with_tier("archive")
+    assert result["total_archive"] == 1
+    assert result["total_hot"] == 0
+    assert result["total_warm"] == 0
+    assert result["total_cold"] == 0
+    assert pr.total_archive == 1
+
+
+# ─── Test 17: gated lead does not increment any tier counter ──────────────────
+
+
+def test_gated_lead_does_not_increment_tier_counters():
+    source = _make_source("usaspending")
+    raw_event = _make_raw_event()
+    evidence = _make_evidence()
+    company = _make_company()
+    db = _make_db()
+
+    with patch(_LOAD_SOURCES, return_value=[source]), \
+         patch(_GET_EVENTS, return_value=[raw_event]), \
+         patch(_CONNECTOR, return_value=MagicMock()), \
+         patch(_EXTRACT, return_value=[evidence]), \
+         patch(_RESOLVE, return_value=company), \
+         patch(_SIGNALS, return_value=[_make_signal()]), \
+         patch(_SCORE, return_value={"scored": False, "tier": None}):
+        result = run_pipeline(db)
+
+    assert result["total_hot"] == 0
+    assert result["total_warm"] == 0
+    assert result["total_cold"] == 0
+    assert result["total_archive"] == 0
+    assert result["companies_scored"] == 0
+
+    pr = _find_added_obj(db, PipelineRun)
+    assert pr.total_hot == 0
+    assert pr.total_warm == 0
+    assert pr.total_cold == 0
+    assert pr.total_archive == 0
+
+
+# ─── Test 18: quarantine_count from connector persisted to pipeline_run ───────
+
+
+def test_quarantine_count_persisted_to_pipeline_run():
+    source = _make_source("usaspending")
+    db = _make_db()
+
+    def fake_connector(db_arg, source_run_arg, source_arg):
+        instance = MagicMock()
+        def fake_run():
+            source_run_arg.quarantine_count = 7
+        instance.run.side_effect = fake_run
+        return instance
+
+    with patch(_LOAD_SOURCES, return_value=[source]), \
+         patch(_GET_EVENTS, return_value=[]), \
+         patch(_CONNECTOR, side_effect=fake_connector):
+        result = run_pipeline(db)
+
+    assert result["quarantine_count"] == 7
+    pr = _find_added_obj(db, PipelineRun)
+    assert pr.quarantine_count == 7
