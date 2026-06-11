@@ -15,7 +15,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db.session import SessionLocal
-from app.ops.lead_quality import BUCKET_KEYS, build_report
+from app.ops.lead_quality import BUCKET_KEYS, build_report, get_action_type_distribution
 
 
 # ─── Formatting helpers ───────────────────────────────────────────────────────
@@ -133,6 +133,25 @@ def _print_tiny_awards(report) -> None:
         print()
 
 
+def _print_action_types(report) -> None:
+    _section("USASPENDING ACTION TYPES  (evidence_items WHERE claim = 'CONTRACT_AWARD')")
+    if not report.action_type_distribution:
+        print("  (no action type data — run a new USASpending fetch to populate)")
+        return
+    print(
+        "  NOTE: Existing rows may show 'unknown' until new USASpending records"
+        " are fetched with Action Type fields."
+    )
+    print()
+    for row in report.action_type_distribution:
+        code = row["action_type"]
+        desc = row["action_type_description"] or "(no description)"
+        total = f"${row['total_award_amount']:,.2f}" if row["total_award_amount"] is not None else "n/a"
+        avg = f"${row['avg_award_amount']:,.2f}" if row["avg_award_amount"] is not None else "n/a"
+        tiny = row["tiny_award_count"]
+        print(f"  {code:<8}  {row['count']:>5} records  total {total:>16}  avg {avg:>16}  tiny {tiny:>4}  {desc}")
+
+
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
@@ -148,6 +167,7 @@ def main() -> None:
     _print_top_agencies(report)
     _print_multi_award(report)
     _print_tiny_awards(report)
+    _print_action_types(report)
 
     print()
     print(_sep("="))

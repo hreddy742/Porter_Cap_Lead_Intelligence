@@ -147,9 +147,17 @@ elif page == "Lead Detail":
 
             with st.expander(f"Evidence ({len(detail['evidence'])} items)"):
                 for ev in detail["evidence"]:
+                    fields = ev.extracted_fields or {}
+                    action_type = fields.get("action_type")
+                    action_desc = fields.get("action_type_description")
+                    action_str = ""
+                    if action_type:
+                        action_str = f" | action_type: {action_type}"
+                        if action_desc:
+                            action_str += f" ({action_desc})"
                     st.write(
                         f"- [{ev.claim_supported}]({ev.source_url}) "
-                        f"— confidence: {float(ev.confidence_score):.2f}"
+                        f"— confidence: {float(ev.confidence_score):.2f}{action_str}"
                     )
 
             with st.expander(f"Signals ({len(detail['signals'])} items)"):

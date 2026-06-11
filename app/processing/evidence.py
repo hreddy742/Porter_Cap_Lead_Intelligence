@@ -116,6 +116,8 @@ def extract_evidence(raw_event_id: UUID, db: Session) -> list[EvidenceItem]:
         "state_code": payload.get("pop_state_code") or payload.get("Place of Performance State Code"),
         "award_type": payload.get("Award Type"),
         "awarding_agency": payload.get("Awarding Agency"),
+        "action_type": payload.get("Action Type"),
+        "action_type_description": payload.get("Action Type Description"),
     }
 
     content_hash = hashlib.sha256(
