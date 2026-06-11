@@ -29,6 +29,7 @@ from app.dashboard.review import (
     list_reviewable_leads,
 )
 from app.db.session import SessionLocal
+from app.ops.sentry import init_sentry
 
 st.set_page_config(
     page_title="Porter Capital — Lead Intelligence",
@@ -36,6 +37,14 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded",
 )
+
+
+@st.cache_resource
+def _init_sentry_once() -> None:
+    init_sentry("dashboard")
+
+
+_init_sentry_once()
 
 # ── Auth ───────────────────────────────────────────────────────────────────────
 # st.context.headers is a dict-like provided by Streamlit; we pass it directly.

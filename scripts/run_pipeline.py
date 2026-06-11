@@ -16,12 +16,14 @@ import sys
 import structlog
 
 from app.db.session import SessionLocal
+from app.ops.sentry import init_sentry
 from app.pipeline.orchestrator import run_pipeline
 
 log = structlog.get_logger()
 
 
 def main() -> None:
+    init_sentry("pipeline")
     log.info("pipeline_entrypoint_starting")
 
     db = SessionLocal()
