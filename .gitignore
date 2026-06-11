@@ -1,5 +1,6 @@
 # Secrets — never commit
 .env
+.env.staging
 *.env.local
 
 # Python
