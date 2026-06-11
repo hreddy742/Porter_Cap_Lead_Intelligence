@@ -15,7 +15,7 @@ import uuid
 from uuid import UUID
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, joinedload
 
 from app.db.models import (
     Company,
@@ -98,6 +98,7 @@ def list_reviewable_leads(db: Session, tier: str | None = None) -> list:
     """
     stmt = (
         select(LeadCandidate)
+        .options(joinedload(LeadCandidate.company))
         .join(Company, LeadCandidate.company_id == Company.id)
         .where(LeadCandidate.status == "active")
         .where(Company.deleted_at.is_(None))

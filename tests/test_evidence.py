@@ -181,3 +181,111 @@ def test_source_url_is_never_none_or_empty():
     assert source_url != "", "source_url must not be empty"
     assert "usaspending.gov" in source_url, "source_url must point to USASpending"
     assert "CONT_AWD_12345" in source_url, "source_url must contain the award ID"
+
+
+# ─── Tests 7–10: NAICS field-name normalization ───────────────────────────────
+
+
+def test_naics_code_from_capitalized_payload_key():
+    """Payload 'NAICS Code' (capitalized API form) maps to extracted_fields['naics_code']."""
+    payload = _default_payload()
+    payload["NAICS Code"] = "541511"
+    raw_event = _make_raw_event(payload=payload)
+    session = _make_session(raw_event=raw_event)
+
+    result = extract_evidence(raw_event.id, session)
+
+    assert len(result) == 1
+    assert result[0].extracted_fields["naics_code"] == "541511"
+
+
+def test_naics_code_from_lowercase_payload_key():
+    """Payload 'naics_code' (lowercase fallback) maps to extracted_fields['naics_code']."""
+    payload = _default_payload()
+    del payload["NAICS Code"]           # remove capitalized form
+    payload["naics_code"] = "541511"    # only lowercase present
+    raw_event = _make_raw_event(payload=payload)
+    session = _make_session(raw_event=raw_event)
+
+    result = extract_evidence(raw_event.id, session)
+
+    assert len(result) == 1
+    assert result[0].extracted_fields["naics_code"] == "541511"
+
+
+def test_naics_description_from_capitalized_payload_key():
+    """Payload 'NAICS Description' (capitalized) maps to extracted_fields['naics_description']."""
+    payload = _default_payload()
+    payload["NAICS Description"] = "Custom Computer Programming Services"
+    raw_event = _make_raw_event(payload=payload)
+    session = _make_session(raw_event=raw_event)
+
+    result = extract_evidence(raw_event.id, session)
+
+    assert len(result) == 1
+    assert result[0].extracted_fields["naics_description"] == "Custom Computer Programming Services"
+
+
+def test_naics_description_from_lowercase_payload_key():
+    """Payload 'naics_description' (lowercase fallback) maps to extracted_fields['naics_description']."""
+    payload = _default_payload()
+    del payload["NAICS Description"]                                    # remove capitalized form
+    payload["naics_description"] = "Custom Computer Programming Services"  # only lowercase present
+    raw_event = _make_raw_event(payload=payload)
+    session = _make_session(raw_event=raw_event)
+
+    result = extract_evidence(raw_event.id, session)
+
+    assert len(result) == 1
+    assert result[0].extracted_fields["naics_description"] == "Custom Computer Programming Services"
+
+
+# ─── Tests 11–13: source_url deep-link behavior ───────────────────────────────
+
+
+def test_source_url_uses_generated_internal_id_when_present():
+    """When generated_internal_id is in the payload, source_url must use it."""
+    payload = _default_payload()
+    payload["generated_internal_id"] = "CONT_AWD_12345_9700_-NONE-_-NONE-"
+    raw_event = _make_raw_event(payload=payload)
+    session = _make_session(raw_event=raw_event)
+
+    result = extract_evidence(raw_event.id, session)
+
+    assert len(result) == 1
+    assert "CONT_AWD_12345_9700_-NONE-_-NONE-" in result[0].source_url, (
+        "source_url must embed generated_internal_id when present"
+    )
+
+
+def test_source_url_is_not_homepage():
+    """source_url must never be the generic USASpending homepage."""
+    raw_event = _make_raw_event()
+    session = _make_session(raw_event=raw_event)
+
+    result = extract_evidence(raw_event.id, session)
+
+    assert len(result) == 1
+    url = result[0].source_url
+    assert url.strip("/") != "https://www.usaspending.gov", (
+        "source_url must not be the generic homepage"
+    )
+    assert "usaspending.gov/award/" in url, (
+        "source_url must be an award detail path"
+    )
+
+
+def test_source_url_falls_back_to_raw_event_source_url_when_no_award_id():
+    """When the payload has neither generated_internal_id nor Award ID, fall back to raw_event.source_url."""
+    payload = _default_payload()
+    del payload["Award ID"]
+    fallback = "https://www.usaspending.gov/award/CONT_AWD_FALLBACK_9700_-NONE-_-NONE-/"
+    raw_event = _make_raw_event(payload=payload, source_url=fallback)
+    session = _make_session(raw_event=raw_event)
+
+    result = extract_evidence(raw_event.id, session)
+
+    assert len(result) == 1
+    assert result[0].source_url == fallback, (
+        "source_url must fall back to raw_event.source_url when payload has no identifier"
+    )

@@ -47,9 +47,9 @@ def _parse_date(value: object) -> date | None:
 
 
 def _compute_freshness(action_date: date) -> float:
-    """max(0.0, round(1.0 - (days_old / 180), 4))"""
+    """Clamp to [0.0, 1.0]; future dates (negative days_old) are treated as maximally fresh."""
     days_old = (date.today() - action_date).days
-    return max(0.0, round(1.0 - (days_old / _FRESHNESS_WINDOW_DAYS), 4))
+    return min(1.0, max(0.0, round(1.0 - (days_old / _FRESHNESS_WINDOW_DAYS), 4)))
 
 
 def extract_evidence(raw_event_id: UUID, db: Session) -> list[EvidenceItem]:
@@ -75,28 +75,45 @@ def extract_evidence(raw_event_id: UUID, db: Session) -> list[EvidenceItem]:
         return []
     company_name = str(company_name_raw).strip()
 
-    # Quarantine: missing or unparseable action_date
-    action_date = _parse_date(payload.get("Start Date"))
+    # Prefer "Action Date" (spending_by_transaction endpoint, real obligation date)
+    # over "Start Date" (spending_by_award endpoint, period-of-performance start which
+    # can be years in the future and produces misleading freshness = 1.0 for all leads).
+    action_date = _parse_date(payload.get("Action Date") or payload.get("Start Date"))
     if action_date is None:
         log.warning(
             "evidence_quarantine_bad_action_date",
-            value=payload.get("Start Date"),
+            value=payload.get("Action Date") or payload.get("Start Date"),
         )
         return []
 
-    # Build source URL from Award ID; fall back to raw_event.source_url
+    # generated_internal_id is the slug USASpending uses in award detail URLs.
+    # Award ID is the PIID and cannot be used as a URL path parameter — it
+    # redirects to the USASpending homepage instead of the award page.
+    generated_id = str(payload.get("generated_internal_id", "")).strip()
     award_id = str(payload.get("Award ID", "")).strip()
-    source_url = _AWARD_URL_TEMPLATE.format(award_id) if award_id else (raw_event.source_url or "")
+    url_key = generated_id or award_id
+    source_url = _AWARD_URL_TEMPLATE.format(url_key) if url_key else (raw_event.source_url or "")
 
-    award_amount_raw = payload.get("Award Amount")
+    # "Transaction Amount" is the spending_by_transaction field name.
+    # "Award Amount" is the legacy spending_by_award field name — kept for backward
+    # compat with raw events already stored under the old endpoint.
+    award_amount_raw = (
+        payload.get("Transaction Amount")
+        if "Transaction Amount" in payload
+        else payload.get("Award Amount")
+    )
     extracted_fields: dict = {
         "company_name": company_name,
         "uei": payload.get("Recipient UEI"),
         "award_amount": str(award_amount_raw) if award_amount_raw is not None else None,
-        "naics_code": payload.get("NAICS Code"),
-        "naics_description": payload.get("NAICS Description"),
+        # Accept both capitalized API field names ("NAICS Code") and lowercase variants
+        # ("naics_code") so that test payloads and future sources work without code changes.
+        "naics_code": payload.get("NAICS Code") or payload.get("naics_code"),
+        "naics_description": payload.get("NAICS Description") or payload.get("naics_description"),
         "action_date": action_date.isoformat(),
-        "state_code": payload.get("Place of Performance State Code"),
+        # "pop_state_code" is the spending_by_transaction field name.
+        # "Place of Performance State Code" is the legacy spending_by_award name.
+        "state_code": payload.get("pop_state_code") or payload.get("Place of Performance State Code"),
         "award_type": payload.get("Award Type"),
         "awarding_agency": payload.get("Awarding Agency"),
     }

@@ -113,8 +113,18 @@ def _execute_source(
                 summary["companies_resolved"] += 1
                 signals = detect_signals_for_evidence(evidence.id, db)
                 summary["signals_created"] += len(signals)
-                score_company(company.id, db)
-                summary["companies_scored"] += 1
+                score_result = score_company(company.id, db)
+                if score_result["scored"]:
+                    summary["companies_scored"] += 1
+                    tier = score_result.get("tier")
+                    if tier == "hot":
+                        summary["total_hot"] += 1
+                    elif tier == "warm":
+                        summary["total_warm"] += 1
+                    elif tier == "cold":
+                        summary["total_cold"] += 1
+                    elif tier == "archive":
+                        summary["total_archive"] += 1
 
         # ── Step 4: mark source completed ─────────────────────────────────────
         source_run.status = "completed"
@@ -124,15 +134,15 @@ def _execute_source(
         log.info("orchestrator_source_succeeded", source_name=source.name)
 
     except Exception as exc:
+        db.rollback()
+        error_msg = str(exc)
+        source_name = source.name
         summary["sources_failed"] += 1
-        summary["errors"].append({
-            "source": source.name,
-            "error": str(exc),
-        })
-        log.error("orchestrator_source_failed", source_name=source.name, error=str(exc))
+        summary["errors"].append({"source": source_name, "error": error_msg})
+        log.error("orchestrator_source_failed", source_name=source_name, error=error_msg)
         try:
             source_run.status = "failed"
-            source_run.error_text = str(exc)
+            source_run.error_text = error_msg
             source_run.finished_at = _utcnow()
             db.commit()
         except Exception:
@@ -158,6 +168,18 @@ def run_pipeline(db: Session) -> dict:
 
     Never raises — all source failures are isolated and recorded in errors.
     """
+    # Reset any stale running pipeline (e.g. from a crashed previous run)
+    stale = db.execute(
+        select(PipelineRun).where(PipelineRun.status == "running")
+    ).scalar_one_or_none()
+    if stale is not None:
+        stale.status = "failed"
+        stale.ended_at = _utcnow()
+        stale.error_summary = "reset by subsequent run"
+        db.flush()
+        db.commit()
+        logger.warning("orchestrator_stale_run_reset", stale_run_id=str(stale.id))
+
     pipeline_run = PipelineRun(
         id=uuid.uuid4(),
         status="running",
@@ -183,6 +205,11 @@ def run_pipeline(db: Session) -> dict:
         "companies_resolved": 0,
         "signals_created": 0,
         "companies_scored": 0,
+        "total_hot": 0,
+        "total_warm": 0,
+        "total_cold": 0,
+        "total_archive": 0,
+        "quarantine_count": 0,
         "errors": [],
     }
 
@@ -198,6 +225,7 @@ def run_pipeline(db: Session) -> dict:
         db.commit()
 
         _execute_source(source, source_run, db, summary)
+        summary["quarantine_count"] += source_run.quarantine_count or 0
 
     # ── Determine final pipeline status ───────────────────────────────────────
     if summary["sources_total"] == 0 or summary["sources_failed"] == 0:
@@ -210,6 +238,11 @@ def run_pipeline(db: Session) -> dict:
     pipeline_run.status = final_status
     pipeline_run.ended_at = _utcnow()
     pipeline_run.total_records = summary["raw_events_processed"]
+    pipeline_run.total_hot = summary["total_hot"]
+    pipeline_run.total_warm = summary["total_warm"]
+    pipeline_run.total_cold = summary["total_cold"]
+    pipeline_run.total_archive = summary["total_archive"]
+    pipeline_run.quarantine_count = summary["quarantine_count"]
     if summary["errors"]:
         pipeline_run.error_summary = "; ".join(e["error"] for e in summary["errors"])
 

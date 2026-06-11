@@ -57,15 +57,17 @@ def _make_session(*, record_exists: bool = False) -> MagicMock:
 
 
 def _award(n: int) -> dict:
-    """Minimal valid USASpending award payload."""
+    """Minimal valid USASpending transaction payload (spending_by_transaction field names)."""
     return {
         "Award ID": f"CONT_AWD_{n:05d}",
+        "generated_internal_id": f"CONT_AWD_{n:05d}_9700_-NONE-_-NONE-",
         "Recipient Name": f"Acme Federal Services {n}",
-        "Award Amount": float(50_000 * n),
-        "Start Date": "2025-03-15",
+        "Transaction Amount": float(50_000 * n),
+        "Action Date": "2025-03-15",
         "Recipient UEI": f"UEI{n:09d}",
-        "NAICS Code": "541511",
-        "Place of Performance State Code": "VA",
+        "naics_code": "541511",
+        "naics_description": "Custom Computer Programming Services",
+        "pop_state_code": "VA",
         "Awarding Agency": "Dept of Defense",
     }
 
@@ -92,8 +94,13 @@ def _run_connector(
     session: MagicMock | None = None,
     source: MagicMock | None = None,
     source_run: MagicMock | None = None,
+    env: dict[str, str] | None = None,
 ) -> tuple[MagicMock, MagicMock, MagicMock]:
-    """Patch httpx.Client, run the connector, return (source_run, session, mock_client)."""
+    """Patch httpx.Client, run the connector, return (source_run, session, mock_client).
+
+    Always resets USASPENDING_* env vars so host-shell exports don't leak into tests.
+    Pass env= to override specific vars for tests that need non-default values.
+    """
     if session is None:
         session = _make_session()
     if source is None:
@@ -101,13 +108,19 @@ def _run_connector(
     if source_run is None:
         source_run = _make_source_run()
 
+    # Clear env vars that could leak from the host shell; callers override via env=
+    env_patch = {"USASPENDING_MAX_PAGES": "", "USASPENDING_PAGE_LIMIT": ""}
+    if env:
+        env_patch.update(env)
+
     with patch("app.pipeline.connectors.usaspending.httpx.Client") as mock_cls:
         mock_client = MagicMock()
         mock_cls.return_value.__enter__.return_value = mock_client
         mock_client.post.side_effect = responses
 
-        connector = USASpendingConnector(session, source_run, source, fiscal_year=2025)
-        connector.run()
+        with patch.dict("os.environ", env_patch):
+            connector = USASpendingConnector(session, source_run, source, fiscal_year=2025)
+            connector.run()
 
     return source_run, session, mock_client
 
@@ -167,8 +180,8 @@ def test_malformed_record_quarantined_others_saved():
     bad_record = {
         "Award ID": "CONT_AWD_BAD01",
         "Recipient Name": "   ",  # blank after strip — validation failure
-        "Award Amount": 75_000.0,
-        "Start Date": "2025-03-15",
+        "Transaction Amount": 75_000.0,
+        "Action Date": "2025-03-15",
     }
     batch = [_award(10), bad_record, _award(11)]
     pages = [_mock_response(batch, has_next=False)]
@@ -226,3 +239,182 @@ def test_empty_results_completes_cleanly():
     assert source_run.records_valid == 0
     assert source_run.status == "completed"
     assert mock_client.post.call_count == 1, "one API call should still be made"
+
+
+# ─── Test 6: USASPENDING_MAX_PAGES=1 stops after one page ────────────────────
+
+
+def test_max_pages_env_var_stops_after_one_page():
+    """
+    When USASPENDING_MAX_PAGES=1, the connector stops after the first page
+    even if hasNext=True, making exactly one HTTP call.
+    """
+    pages = [
+        _mock_response([_award(1), _award(2)], has_next=True),
+        _mock_response([_award(3), _award(4)], has_next=False),
+    ]
+
+    source_run, _session, mock_client = _run_connector(
+        responses=pages, env={"USASPENDING_MAX_PAGES": "1"}
+    )
+
+    assert mock_client.post.call_count == 1, "should stop after one page"
+    assert source_run.records_fetched == 2
+    assert source_run.records_valid == 2
+    assert source_run.status == "completed"
+
+
+# ─── Test 7: USASPENDING_PAGE_LIMIT=10 sent in request body ──────────────────
+
+
+def test_page_limit_env_var_sent_in_request():
+    """
+    When USASPENDING_PAGE_LIMIT=10, the connector sends limit=10 in the
+    POST body instead of the default 100.
+    """
+    pages = [_mock_response([_award(1)], has_next=False)]
+
+    _source_run, _session, mock_client = _run_connector(
+        responses=pages, env={"USASPENDING_PAGE_LIMIT": "10"}
+    )
+
+    call_kwargs = mock_client.post.call_args
+    sent_body = call_kwargs.kwargs.get("json") or call_kwargs.args[1]
+    assert sent_body["limit"] == 10, "request body must reflect the env var page limit"
+
+
+# ─── Test 8: NAICS filter present in request body ────────────────────────────
+
+
+def test_naics_filter_sent_in_request_body():
+    """
+    The connector must send naics_codes in filters so the API returns
+    AR-heavy industry transactions rather than all federal contracts.
+    """
+    pages = [_mock_response([_award(1)], has_next=False)]
+
+    _source_run, _session, mock_client = _run_connector(responses=pages)
+
+    call_kwargs = mock_client.post.call_args
+    sent_body = call_kwargs.kwargs.get("json") or call_kwargs.args[1]
+    filters = sent_body.get("filters", {})
+    assert "naics_codes" in filters, "filters must include naics_codes"
+    assert len(filters["naics_codes"]) > 0, "naics_codes filter must not be empty"
+
+
+# ─── Test 9: Action Date sort sent in request body ───────────────────────────
+
+
+def test_action_date_sort_sent_in_request_body():
+    """
+    Sorting by Action Date (real obligation date) ensures most-recent
+    contracts are returned first, producing accurate freshness scores.
+    """
+    pages = [_mock_response([_award(1)], has_next=False)]
+
+    _source_run, _session, mock_client = _run_connector(responses=pages)
+
+    call_kwargs = mock_client.post.call_args
+    sent_body = call_kwargs.kwargs.get("json") or call_kwargs.args[1]
+    assert sent_body.get("sort") == "Action Date", (
+        "request must sort by 'Action Date' — not 'Start Date'"
+    )
+
+
+# ─── Test 10: spending_by_transaction endpoint URL ────────────────────────────
+
+
+def test_request_targets_spending_by_transaction_endpoint():
+    """
+    The connector must POST to spending_by_transaction, not spending_by_award.
+    spending_by_award returns NAICS Code = null for most DoD contracts.
+    """
+    pages = [_mock_response([_award(1)], has_next=False)]
+
+    _source_run, _session, mock_client = _run_connector(responses=pages)
+
+    call_url = mock_client.post.call_args.args[0]
+    assert "spending_by_transaction" in call_url, (
+        f"expected spending_by_transaction endpoint, got: {call_url}"
+    )
+    assert "spending_by_award" not in call_url, (
+        "must not use the award endpoint — it returns null NAICS codes"
+    )
+
+
+# ─── Test 11: award type codes A/B/C/D present in request body ───────────────
+
+
+def test_award_type_codes_sent_in_request_body():
+    """
+    Award type codes A/B/C/D filter to contracts only (excludes grants/loans).
+    The connector must include all four codes so we do not miss any contract type.
+    """
+    pages = [_mock_response([_award(1)], has_next=False)]
+
+    _source_run, _session, mock_client = _run_connector(responses=pages)
+
+    call_kwargs = mock_client.post.call_args
+    sent_body = call_kwargs.kwargs.get("json") or call_kwargs.args[1]
+    filters = sent_body.get("filters", {})
+    codes = set(filters.get("award_type_codes", []))
+    assert codes == {"A", "B", "C", "D"}, (
+        f"award_type_codes must be exactly {{A, B, C, D}}, got {codes}"
+    )
+
+
+# ─── Test 12: generated_internal_id requested in API fields ──────────────────
+
+
+def test_generated_internal_id_in_requested_fields():
+    """
+    The connector must request generated_internal_id from the API.
+    Award ID is the PIID and cannot be used as a URL slug — it redirects
+    to the USASpending homepage. generated_internal_id is the correct key.
+    """
+    from app.pipeline.connectors.usaspending import _FIELDS
+
+    assert "generated_internal_id" in _FIELDS, (
+        "generated_internal_id must be in _FIELDS so the API returns it"
+    )
+
+
+# ─── Test 13: source_url uses generated_internal_id, not bare Award ID ────────
+
+
+def test_connector_source_url_uses_generated_internal_id():
+    """
+    source_url stored in raw_source_events must contain generated_internal_id
+    (the USASpending URL slug), not just the PIID (Award ID).
+    """
+    award_data = _award(1)
+    pages = [_mock_response([award_data], has_next=False)]
+
+    _source_run, session, _client = _run_connector(responses=pages)
+
+    added = session.add.call_args[0][0]
+    assert award_data["generated_internal_id"] in added.source_url, (
+        "source_url must embed generated_internal_id"
+    )
+
+
+# ─── Test 14: source_url is not the generic USASpending homepage ──────────────
+
+
+def test_connector_source_url_is_not_homepage():
+    """
+    source_url must never be the generic USASpending homepage; it must be a
+    deep link to a specific award.
+    """
+    pages = [_mock_response([_award(1)], has_next=False)]
+
+    _source_run, session, _client = _run_connector(responses=pages)
+
+    added = session.add.call_args[0][0]
+    assert added.source_url is not None
+    assert added.source_url.strip("/") != "https://www.usaspending.gov", (
+        "source_url must not be the homepage"
+    )
+    assert "usaspending.gov/award/" in added.source_url, (
+        "source_url must be an award detail URL"
+    )

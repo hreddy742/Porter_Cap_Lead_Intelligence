@@ -1,16 +1,31 @@
 """
 USASpending.gov connector — fetches federal contract award records.
 
-Paginates POST /api/v2/search/spending_by_award/ until hasNext=False.
+Paginates POST /api/v2/search/spending_by_transaction/ until hasNext=False.
 Deduplicates by SHA-256(raw payload) against (source_id, content_hash).
 Any exception during fetch is caught: source_run marked failed, no re-raise.
 Pydantic validation failure increments quarantine_count and continues.
+
+Endpoint: spending_by_transaction (not spending_by_award)
+  Reason: the transaction endpoint populates naics_code/naics_description in the
+  response. The award endpoint returns NAICS Code = null for most DoD contracts,
+  which prevents NAICS-based scoring. The transaction endpoint also exposes
+  Action Date (real obligation date) rather than the period-of-performance Start
+  Date, which can be years in the future and produces misleading freshness scores.
+
+Field name differences from spending_by_award:
+  "Transaction Amount"  (was "Award Amount")
+  "Action Date"         (was "Start Date")
+  "naics_code"          lowercase (was "NAICS Code" — always null)
+  "naics_description"   lowercase (new)
+  "pop_state_code"      (was "Place of Performance State Code")
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -24,18 +39,38 @@ from app.db.models import RawSourceEvent, SourceRegistry, SourceRun
 
 logger = structlog.get_logger(__name__)
 
+# Fields to request from spending_by_transaction.
+# Field names are endpoint-specific — do not mix with spending_by_award names.
+# generated_internal_id is the USASpending unique key used in award detail URLs
+# (e.g. CONT_AWD_FA880321D0002_9700_-NONE-_-NONE-). "Award ID" is just the PIID
+# and cannot be used as a URL path parameter — it redirects to the homepage.
 _FIELDS = [
     "Award ID",
     "Recipient Name",
-    "Award Amount",
-    "Start Date",
+    "Transaction Amount",
+    "Action Date",
     "Recipient UEI",
-    "NAICS Code",
-    "Place of Performance State Code",
+    "naics_code",
+    "naics_description",
+    "pop_state_code",
     "Awarding Agency",
+    "generated_internal_id",
 ]
 
-_AWARD_TYPE_CODES = ["A", "B", "C", "D"]  # contracts only
+_AWARD_TYPE_CODES = ["A", "B", "C", "D"]  # contracts only (excludes grants/loans)
+
+# 2-digit NAICS sector prefixes for industries most likely to need A/R financing.
+# The USASpending API accepts prefix matching in the naics_codes filter.
+# These sectors commonly carry large receivables against government contracts:
+#   23  = Construction
+#   31-33 = Manufacturing
+#   42  = Wholesale Trade
+#   48-49 = Transportation and Warehousing
+#   54  = Professional, Scientific, and Technical Services
+#   56  = Administrative and Support / Staffing Services
+# Excluding DoD-prime-dominated NAICS is not needed: scoring already penalises
+# out-of-range award amounts, so large primes naturally score lower.
+_TARGET_NAICS_PREFIXES = ["23", "31", "32", "33", "42", "48", "49", "54", "56"]
 
 
 def _utcnow() -> datetime:
@@ -57,18 +92,20 @@ def _fiscal_year_range(fy: int) -> tuple[str, str]:
 
 
 class USASpendingRecord(BaseModel):
-    """Validated representation of one USASpending contract award."""
+    """Validated representation of one USASpending contract transaction."""
 
     model_config = ConfigDict(populate_by_name=True)
 
     award_id: str = Field(alias="Award ID")
     recipient_name: str = Field(alias="Recipient Name")
-    award_amount: Decimal = Field(alias="Award Amount")
-    award_date: date = Field(alias="Start Date")
+    award_amount: Decimal = Field(alias="Transaction Amount")
+    award_date: date = Field(alias="Action Date")
     recipient_uei: str | None = Field(None, alias="Recipient UEI")
-    naics_code: str | None = Field(None, alias="NAICS Code")
-    state_code: str | None = Field(None, alias="Place of Performance State Code")
+    naics_code: str | None = Field(None, alias="naics_code")
+    naics_description: str | None = Field(None, alias="naics_description")
+    state_code: str | None = Field(None, alias="pop_state_code")
     awarding_agency: str | None = Field(None, alias="Awarding Agency")
+    generated_internal_id: str | None = Field(None)
 
     @field_validator("award_id", mode="before")
     @classmethod
@@ -123,11 +160,24 @@ class USASpendingRecord(BaseModel):
 
 class USASpendingConnector:
     """
-    Fetches federal contract awards from USASpending.gov and stores raw events.
+    Fetches federal contract transactions from USASpending.gov and stores raw events.
+
+    Uses the spending_by_transaction endpoint filtered to AR-heavy NAICS sectors
+    so that response records have naics_code populated (unlike spending_by_award
+    which returns NAICS Code = null for most DoD contracts).
 
     Usage:
         connector = USASpendingConnector(session, source_run, source)
         connector.run()   # never raises; all errors recorded in source_run
+
+    Default behavior:
+        - 100 records per page
+        - fetch all pages until hasNext=False
+
+    Local testing (PowerShell env vars before running):
+        $env:USASPENDING_PAGE_LIMIT="10"
+        $env:USASPENDING_MAX_PAGES="1"
+        → 10 records per page, stop after 1 page (max 10 records total)
     """
 
     BASE_URL = "https://api.usaspending.gov/api/v2"
@@ -145,6 +195,12 @@ class USASpendingConnector:
         self.source_run = source_run
         self.source = source
         self.fiscal_year = fiscal_year or _current_fiscal_year()
+
+        page_limit_raw = os.getenv("USASPENDING_PAGE_LIMIT")
+        max_pages_raw = os.getenv("USASPENDING_MAX_PAGES")
+        self.page_limit = int(page_limit_raw) if page_limit_raw else self.PAGE_LIMIT
+        self.max_pages = int(max_pages_raw) if max_pages_raw else None
+
         self._log = logger.bind(
             connector="usaspending",
             source_run_id=str(source_run.id),
@@ -174,6 +230,8 @@ class USASpendingConnector:
                     self._process_record(raw)
                 if not has_next:
                     break
+                if self.max_pages is not None and page >= self.max_pages:
+                    break
                 page += 1
 
     def _fetch_page(self, client: httpx.Client, page: int) -> tuple[list[dict], bool]:
@@ -182,14 +240,15 @@ class USASpendingConnector:
             "filters": {
                 "award_type_codes": _AWARD_TYPE_CODES,
                 "time_period": [{"start_date": start_date, "end_date": end_date}],
+                "naics_codes": _TARGET_NAICS_PREFIXES,
             },
             "fields": _FIELDS,
             "page": page,
-            "limit": self.PAGE_LIMIT,
-            "sort": "Award Amount",
+            "limit": self.page_limit,
+            "sort": "Action Date",
             "order": "desc",
         }
-        resp = client.post(f"{self.BASE_URL}/search/spending_by_award/", json=body)
+        resp = client.post(f"{self.BASE_URL}/search/spending_by_transaction/", json=body)
         resp.raise_for_status()
         data = resp.json()
         results: list[dict] = data.get("results", [])
@@ -229,6 +288,9 @@ class USASpendingConnector:
             self.source_run.records_skipped += 1
             return
 
+        # generated_internal_id is the slug USASpending uses in its own award URLs.
+        # award_id is just the PIID and does not resolve as a URL path parameter.
+        url_key = record.generated_internal_id or record.award_id
         event = RawSourceEvent(
             source_id=self.source.id,
             source_run_id=self.source_run.id,
@@ -236,7 +298,7 @@ class USASpendingConnector:
             company_name_raw=record.recipient_name,
             payload=raw,
             content_hash=content_hash,
-            source_url=f"https://www.usaspending.gov/award/{record.award_id}/",
+            source_url=f"https://www.usaspending.gov/award/{url_key}/",
         )
         self.session.add(event)
         self.source_run.records_valid += 1
