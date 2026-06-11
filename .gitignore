@@ -44,3 +44,6 @@ logs/
 
 # Exports — keep directory tracked, ignore generated CSVs
 exports/*.csv
+
+# Backups — keep directory tracked, ignore generated SQL dumps
+backups/*.sql
