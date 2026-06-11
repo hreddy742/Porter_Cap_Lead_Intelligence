@@ -26,6 +26,8 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import random
+import time
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 
@@ -72,6 +74,12 @@ _AWARD_TYPE_CODES = ["A", "B", "C", "D"]  # contracts only (excludes grants/loan
 # out-of-range award amounts, so large primes naturally score lower.
 _TARGET_NAICS_PREFIXES = ["23", "31", "32", "33", "42", "48", "49", "54", "56"]
 
+_RETRYABLE_HTTP_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
+
+
+class ConnectorError(Exception):
+    """Raised when all retry attempts for a transient connector error are exhausted."""
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -86,6 +94,26 @@ def _current_fiscal_year() -> int:
 def _fiscal_year_range(fy: int) -> tuple[str, str]:
     """Return ISO (start_date, end_date) for a US fiscal year."""
     return f"{fy - 1}-10-01", f"{fy}-09-30"
+
+
+def _env_float(var: str, default: float) -> float:
+    raw = os.getenv(var)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        raise ValueError(f"{var}={raw!r} is not a valid number")
+
+
+def _env_int(var: str, default: int) -> int:
+    raw = os.getenv(var)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        raise ValueError(f"{var}={raw!r} is not a valid integer")
 
 
 # ─── Pydantic v2 record model ─────────────────────────────────────────────────
@@ -201,6 +229,11 @@ class USASpendingConnector:
         self.page_limit = int(page_limit_raw) if page_limit_raw else self.PAGE_LIMIT
         self.max_pages = int(max_pages_raw) if max_pages_raw else None
 
+        self.timeout = _env_float("USASPENDING_TIMEOUT_SECONDS", 30.0)
+        self.max_retries = _env_int("USASPENDING_MAX_RETRIES", 3)
+        self.backoff_base = _env_float("USASPENDING_BACKOFF_BASE_SECONDS", 2.0)
+        self.backoff_max = _env_float("USASPENDING_BACKOFF_MAX_SECONDS", 60.0)
+
         self._log = logger.bind(
             connector="usaspending",
             source_run_id=str(source_run.id),
@@ -223,7 +256,7 @@ class USASpendingConnector:
 
     def _fetch_all_pages(self) -> None:
         page = 1
-        with httpx.Client(timeout=30.0) as client:
+        with httpx.Client(timeout=self.timeout) as client:
             while True:
                 results, has_next = self._fetch_page(client, page)
                 for raw in results:
@@ -248,12 +281,44 @@ class USASpendingConnector:
             "sort": "Action Date",
             "order": "desc",
         }
-        resp = client.post(f"{self.BASE_URL}/search/spending_by_transaction/", json=body)
-        resp.raise_for_status()
-        data = resp.json()
-        results: list[dict] = data.get("results", [])
-        has_next: bool = bool(data.get("page_metadata", {}).get("hasNext", False))
-        return results, has_next
+        url = f"{self.BASE_URL}/search/spending_by_transaction/"
+        last_exc: Exception | None = None
+        for attempt in range(self.max_retries + 1):
+            if attempt > 0:
+                delay = min(
+                    self.backoff_base * (2 ** (attempt - 1)) + random.uniform(0, 1),
+                    self.backoff_max,
+                )
+                self._log.warning(
+                    "usaspending_retry",
+                    attempt=attempt,
+                    page=page,
+                    delay_seconds=round(delay, 2),
+                )
+                time.sleep(delay)
+            try:
+                resp = client.post(url, json=body)
+                if resp.status_code in _RETRYABLE_HTTP_STATUS_CODES:
+                    last_exc = httpx.HTTPStatusError(
+                        f"HTTP {resp.status_code}",
+                        request=resp.request,
+                        response=resp,
+                    )
+                    continue
+                resp.raise_for_status()
+                data = resp.json()
+                results: list[dict] = data.get("results", [])
+                has_next: bool = bool(data.get("page_metadata", {}).get("hasNext", False))
+                return results, has_next
+            except (httpx.TimeoutException, httpx.ConnectError, httpx.RemoteProtocolError) as exc:
+                last_exc = exc
+            except httpx.HTTPStatusError:
+                raise  # permanent client error — do not retry
+
+        raise ConnectorError(
+            f"USASpending request failed after {self.max_retries + 1} attempts"
+            f" on page {page}: {last_exc}"
+        )
 
     def _process_record(self, raw: dict) -> None:
         # Count every record received from the API regardless of outcome
