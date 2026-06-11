@@ -72,6 +72,7 @@ class LeadQualityReport:
     top_agencies: list[dict] = field(default_factory=list)
     multi_award_companies: list[dict] = field(default_factory=list)
     tiny_award_examples: list[dict] = field(default_factory=list)
+    action_type_distribution: list[dict] = field(default_factory=list)
 
 
 # ─── Individual query functions ───────────────────────────────────────────────
@@ -307,6 +308,48 @@ def get_tiny_award_examples(
     ]
 
 
+def get_action_type_distribution(db: Session) -> list[dict]:
+    """Return USASpending action type distribution from evidence_items.
+
+    Reads extracted_fields->>'action_type' and extracted_fields->>'action_type_description'.
+    NULL action_type values (from rows fetched before this field was requested) appear
+    as 'unknown'. Award amount stats come from the signals table (typed Numeric column)
+    via LEFT JOIN so evidence items without a resolved signal are still counted.
+    Display-only — never used for scoring, gating, or filtering.
+    """
+    rows = db.execute(
+        text("""
+            SELECT
+              COALESCE(ei.extracted_fields->>'action_type', 'unknown')        AS action_type,
+              MAX(ei.extracted_fields->>'action_type_description')            AS action_type_description,
+              COUNT(DISTINCT ei.id)                                            AS count,
+              SUM(s.award_amount)                                              AS total_award_amount,
+              AVG(s.award_amount)                                              AS avg_award_amount,
+              COUNT(s.id) FILTER (
+                WHERE s.award_amount > 0 AND s.award_amount < 50000
+              )                                                                AS tiny_award_count
+            FROM evidence_items ei
+            LEFT JOIN signals s ON s.evidence_id = ei.id
+              AND s.signal_type = 'CONTRACT_AWARD'
+            WHERE ei.claim_supported = 'CONTRACT_AWARD'
+            GROUP BY ei.extracted_fields->>'action_type'
+            ORDER BY count DESC
+        """)
+    ).fetchall()
+
+    return [
+        {
+            "action_type": row.action_type,
+            "action_type_description": row.action_type_description,
+            "count": int(row.count),
+            "total_award_amount": float(row.total_award_amount) if row.total_award_amount is not None else None,
+            "avg_award_amount": float(row.avg_award_amount) if row.avg_award_amount is not None else None,
+            "tiny_award_count": int(row.tiny_award_count) if row.tiny_award_count is not None else 0,
+        }
+        for row in rows
+    ]
+
+
 # ─── Report builder ───────────────────────────────────────────────────────────
 
 def build_report(db: Session) -> LeadQualityReport:
@@ -322,4 +365,5 @@ def build_report(db: Session) -> LeadQualityReport:
         top_agencies=get_top_agencies(db),
         multi_award_companies=get_multi_award_companies(db),
         tiny_award_examples=get_tiny_award_examples(db),
+        action_type_distribution=get_action_type_distribution(db),
     )

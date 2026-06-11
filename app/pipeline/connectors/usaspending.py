@@ -57,6 +57,8 @@ _FIELDS = [
     "pop_state_code",
     "Awarding Agency",
     "generated_internal_id",
+    "Action Type",
+    "Action Type Description",
 ]
 
 _AWARD_TYPE_CODES = ["A", "B", "C", "D"]  # contracts only (excludes grants/loans)
@@ -134,6 +136,8 @@ class USASpendingRecord(BaseModel):
     state_code: str | None = Field(None, alias="pop_state_code")
     awarding_agency: str | None = Field(None, alias="Awarding Agency")
     generated_internal_id: str | None = Field(None)
+    action_type: str | None = Field(None, alias="Action Type")
+    action_type_description: str | None = Field(None, alias="Action Type Description")
 
     @field_validator("award_id", mode="before")
     @classmethod

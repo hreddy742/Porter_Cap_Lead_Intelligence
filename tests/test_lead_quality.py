@@ -26,6 +26,7 @@ from app.ops.lead_quality import (
     count_evidence_items,
     count_lead_candidates,
     count_raw_source_records,
+    get_action_type_distribution,
     get_award_buckets,
     get_multi_award_companies,
     get_tier_counts,
@@ -344,24 +345,85 @@ class TestGetTinyAwardExamples:
         assert result[0]["signal_date"] is None
 
 
+# ─── get_action_type_distribution ────────────────────────────────────────────
+
+ActionTypeRow = namedtuple(
+    "ActionTypeRow",
+    ["action_type", "action_type_description", "count", "total_award_amount", "avg_award_amount", "tiny_award_count"],
+)
+
+
+class TestGetActionTypeDistribution:
+    def _db_with_rows(self, rows):
+        db = MagicMock()
+        db.execute.return_value.fetchall.return_value = rows
+        return db
+
+    def test_returns_list_of_dicts(self):
+        rows = [
+            ActionTypeRow("A", "Additional Work", 50, Decimal("2500000"), Decimal("50000"), 5),
+        ]
+        result = get_action_type_distribution(self._db_with_rows(rows))
+        assert len(result) == 1
+        assert result[0]["action_type"] == "A"
+        assert result[0]["action_type_description"] == "Additional Work"
+        assert result[0]["count"] == 50
+        assert result[0]["total_award_amount"] == pytest.approx(2500000.0)
+        assert result[0]["avg_award_amount"] == pytest.approx(50000.0)
+        assert result[0]["tiny_award_count"] == 5
+
+    def test_null_action_type_shown_as_unknown(self):
+        # SQL COALESCE maps NULL action_type → 'unknown'; the Python layer just returns it
+        rows = [ActionTypeRow("unknown", None, 100, None, None, 0)]
+        result = get_action_type_distribution(self._db_with_rows(rows))
+        assert result[0]["action_type"] == "unknown"
+
+    def test_missing_description_is_none(self):
+        rows = [ActionTypeRow("B", None, 10, Decimal("500000"), Decimal("50000"), 0)]
+        result = get_action_type_distribution(self._db_with_rows(rows))
+        assert result[0]["action_type_description"] is None
+
+    def test_tiny_award_count_correct(self):
+        rows = [ActionTypeRow("A", "Original", 20, Decimal("800000"), Decimal("40000"), 15)]
+        result = get_action_type_distribution(self._db_with_rows(rows))
+        assert result[0]["tiny_award_count"] == 15
+
+    def test_null_total_amount_becomes_none(self):
+        # Evidence items with no resolved signal have no award_amount from the LEFT JOIN
+        rows = [ActionTypeRow("unknown", None, 3, None, None, 0)]
+        result = get_action_type_distribution(self._db_with_rows(rows))
+        assert result[0]["total_award_amount"] is None
+        assert result[0]["avg_award_amount"] is None
+
+    def test_null_tiny_award_count_becomes_zero(self):
+        rows = [ActionTypeRow("C", "Change Order", 5, Decimal("100000"), Decimal("20000"), None)]
+        result = get_action_type_distribution(self._db_with_rows(rows))
+        assert result[0]["tiny_award_count"] == 0
+
+    def test_empty_returns_empty_list(self):
+        assert get_action_type_distribution(self._db_with_rows([])) == []
+
+    def test_multiple_action_types(self):
+        rows = [
+            ActionTypeRow("A", "Original", 80, Decimal("8000000"), Decimal("100000"), 10),
+            ActionTypeRow("B", "Additional Work", 20, Decimal("1000000"), Decimal("50000"), 5),
+            ActionTypeRow("unknown", None, 5, None, None, 0),
+        ]
+        result = get_action_type_distribution(self._db_with_rows(rows))
+        assert len(result) == 3
+        assert result[0]["action_type"] == "A"
+        assert result[1]["action_type"] == "B"
+        assert result[2]["action_type"] == "unknown"
+
+
 # ─── build_report ─────────────────────────────────────────────────────────────
 
 class TestBuildReport:
     def test_assembles_all_fields(self):
         """build_report calls every sub-function and assembles the dataclass."""
         db = MagicMock()
-        patches = {
-            "app.ops.lead_quality.count_raw_source_records": 50,
-            "app.ops.lead_quality.count_evidence_items": 100,
-            "app.ops.lead_quality.count_companies": 25,
-            "app.ops.lead_quality.count_lead_candidates": 20,
-            "app.ops.lead_quality.get_tier_counts": {"warm": 5, "cold": 10},
-            "app.ops.lead_quality.get_award_buckets": {"under_50k": 3, "over_1m": 1},
-            "app.ops.lead_quality.get_top_naics": [{"naics_code": "541511"}],
-            "app.ops.lead_quality.get_top_agencies": [{"agency": "DOD", "evidence_count": 8}],
-            "app.ops.lead_quality.get_multi_award_companies": [],
-            "app.ops.lead_quality.get_tiny_award_examples": [],
-        }
+        _action_type_data = [{"action_type": "A", "action_type_description": "Original", "count": 10,
+                               "total_award_amount": 500000.0, "avg_award_amount": 50000.0, "tiny_award_count": 2}]
 
         with (
             patch("app.ops.lead_quality.count_raw_source_records", return_value=50),
@@ -374,6 +436,7 @@ class TestBuildReport:
             patch("app.ops.lead_quality.get_top_agencies", return_value=[]),
             patch("app.ops.lead_quality.get_multi_award_companies", return_value=[]),
             patch("app.ops.lead_quality.get_tiny_award_examples", return_value=[]),
+            patch("app.ops.lead_quality.get_action_type_distribution", return_value=_action_type_data),
         ):
             report = build_report(db)
 
@@ -388,3 +451,4 @@ class TestBuildReport:
         assert report.top_agencies == []
         assert report.multi_award_companies == []
         assert report.tiny_award_examples == []
+        assert report.action_type_distribution == _action_type_data
