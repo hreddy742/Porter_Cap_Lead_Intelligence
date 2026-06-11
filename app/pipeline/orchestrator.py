@@ -20,6 +20,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import PipelineRun, RawSourceEvent, SourceRegistry, SourceRun
+from app.ops.sentry import capture_exception
 from app.pipeline.connectors.usaspending import USASpendingConnector
 from app.processing.evidence import extract_evidence
 from app.processing.resolution import resolve_company_for_evidence
@@ -140,6 +141,8 @@ def _execute_source(
         summary["sources_failed"] += 1
         summary["errors"].append({"source": source_name, "error": error_msg})
         log.error("orchestrator_source_failed", source_name=source_name, error=error_msg)
+        sr_id = str(source_run.id) if getattr(source_run, "id", None) is not None else None
+        capture_exception(exc, {"source": source_name, "source_run_id": sr_id})
         try:
             source_run.status = "failed"
             source_run.error_text = error_msg
