@@ -10,6 +10,9 @@ engine, push to Salesforce, or delete anything.
 """
 from __future__ import annotations
 
+import os
+from datetime import date, timedelta
+from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
 from sqlalchemy import select
@@ -26,6 +29,36 @@ _SOFT_BLOCK_ROUTES = frozenset({
     "duplicate_review",
     "research_review",
 })
+
+
+def _parse_env_decimal(name: str, default: Decimal) -> Decimal:
+    """Read an env var and parse it as Decimal.
+
+    Returns default if the variable is unset.
+    Raises ValueError with a clear message if the value is set but not a valid decimal,
+    so misconfiguration is caught at call time rather than silently producing wrong results.
+    """
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    try:
+        return Decimal(raw.strip())
+    except (InvalidOperation, ValueError):
+        raise ValueError(
+            f"Configuration error: {name}={raw!r} is not a valid decimal number. "
+            f"Fix the environment variable or unset it to use the default ({default})."
+        )
+
+
+def _parse_signal_amount(value) -> Decimal | None:
+    """Return value as a positive Decimal, or None if non-positive or unparseable."""
+    if value is None:
+        return None
+    try:
+        d = Decimal(str(value))
+        return d if d > 0 else None
+    except (InvalidOperation, ValueError):
+        return None
 
 
 def _gated(gate_reason: str, route: str) -> dict:
@@ -145,6 +178,31 @@ def evaluate_mandatory_gates(company_id: UUID, db: Session) -> dict:
             "should_score": False,
             "suppression": suppression,
         }
+
+    # Gate 10 — award amount quality gate
+    # Only positive award amounts count. A company passes if:
+    #   (a) its largest single positive award >= MIN_QUALIFYING_SINGLE_AWARD_AMOUNT, OR
+    #   (b) its total positive awards in the last 90 days >= MIN_QUALIFYING_COMPANY_90D_AWARD_TOTAL.
+    # Negative and zero amounts never contribute to qualification.
+    _min_single = _parse_env_decimal(
+        "MIN_QUALIFYING_SINGLE_AWARD_AMOUNT", Decimal("10000")
+    )
+    _min_90d = _parse_env_decimal(
+        "MIN_QUALIFYING_COMPANY_90D_AWARD_TOTAL", Decimal("10000")
+    )
+    cutoff = date.today() - timedelta(days=90)
+    largest_single = Decimal("0")
+    recent_total = Decimal("0")
+    for s in signals:
+        amt = _parse_signal_amount(s.award_amount)
+        if amt is None:
+            continue
+        if amt > largest_single:
+            largest_single = amt
+        if isinstance(s.signal_date, date) and s.signal_date >= cutoff:
+            recent_total += amt
+    if largest_single < _min_single and recent_total < _min_90d:
+        return _gated("award_amount_too_small", "archive")
 
     # All gates passed — company may proceed to scoring
     return {
