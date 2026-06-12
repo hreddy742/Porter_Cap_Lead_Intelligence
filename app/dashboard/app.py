@@ -24,6 +24,8 @@ import streamlit as st
 from app.dashboard.review import (
     VALID_ACTIONS,
     create_review_decision,
+    format_currency,
+    format_date,
     get_award_aggregation,
     get_award_gate_summary,
     get_lead_detail,
@@ -65,6 +67,10 @@ else:
 page = st.sidebar.radio("Navigation", ["Lead List", "Lead Detail"])
 
 st.title("Porter Capital — Lead Intelligence")
+st.warning(
+    "Phase 2A research-ready leads only. Not sales-ready. "
+    "No verified contacts. No Salesforce push. Human review required."
+)
 
 # ── Lead List ──────────────────────────────────────────────────────────────────
 if page == "Lead List":
@@ -77,31 +83,38 @@ if page == "Lead List":
 
     st.subheader("Active Leads")
 
+    # Summary metrics — computed from already-loaded leads, no extra DB call
+    total = len(leads)
+    hot_count = sum(1 for lead in leads if lead.tier == "hot")
+    warm_count = sum(1 for lead in leads if lead.tier == "warm")
+    cold_count = sum(1 for lead in leads if lead.tier == "cold")
+    m1, m2, m3, m4 = st.columns(4)
+    m1.metric("Active Leads", total)
+    m2.metric("Hot", hot_count)
+    m3.metric("Warm", warm_count)
+    m4.metric("Cold", cold_count)
+
     if not leads:
         st.info("No active leads found for this filter.")
     else:
-        header = st.columns([3, 1, 1, 2, 3])
-        header[0].markdown("**Company**")
-        header[1].markdown("**Tier**")
-        header[2].markdown("**Score**")
-        header[3].markdown("**Sales Status**")
-        header[4].markdown("**Lead ID** (paste into Lead Detail)")
-        st.divider()
-
-        for lead in leads:
-            company_name = (
-                lead.company.canonical_name
-                if lead.company
-                else str(lead.company_id)
-            )
-            cols = st.columns([3, 1, 1, 2, 3])
-            cols[0].write(company_name)
-            cols[1].write(lead.tier or "—")
-            cols[2].write(
-                str(lead.current_score) if lead.current_score is not None else "—"
-            )
-            cols[3].write(lead.sales_status)
-            cols[4].code(str(lead.id))
+        st.info("Click a Lead ID cell to copy it, then paste into Lead Detail.")
+        rows = [
+            {
+                "Company": (
+                    lead.company.canonical_name if lead.company else str(lead.company_id)
+                ),
+                "Tier": lead.tier or "Not available",
+                "Score": (
+                    str(lead.current_score)
+                    if lead.current_score is not None
+                    else "Not available"
+                ),
+                "Review Status": lead.sales_status or "Not available",
+                "Lead ID": str(lead.id),
+            }
+            for lead in leads
+        ]
+        st.dataframe(rows, hide_index=True)
 
 # ── Lead Detail ────────────────────────────────────────────────────────────────
 elif page == "Lead Detail":
@@ -126,28 +139,30 @@ elif page == "Lead Detail":
 
             company_name = company.canonical_name if company else "Unknown"
             st.subheader(company_name)
+            st.info("Research-ready lead — needs verification before outreach.")
 
-            with st.expander("Company Details", expanded=True):
+            with st.expander("Company Summary", expanded=True):
                 if company:
                     c1, c2 = st.columns(2)
-                    c1.write(f"**State:** {company.state or '—'}")
-                    c1.write(f"**NAICS:** {company.naics_code or '—'}")
-                    c1.write(f"**Business Type:** {company.business_type or '—'}")
-                    c2.write(f"**Domain:** {company.website_domain or '—'}")
-                    c2.write(f"**Industry:** {company.industry or '—'}")
-                    c2.write(f"**Gate Result:** {lead.gate_result or '—'}")
+                    c1.write(f"**State:** {company.state or 'Not available'}")
+                    c1.write(f"**NAICS:** {company.naics_code or 'Not available'}")
+                    c1.write(f"**Business Type:** {company.business_type or 'Not available'}")
+                    c2.write(f"**Domain:** {company.website_domain or 'Not available'}")
+                    c2.write(f"**Industry:** {company.industry or 'Not available'}")
+                    c2.write(f"**Gate Result:** {lead.gate_result or 'Not available'}")
 
-            with st.expander("Latest Score", expanded=True):
+            with st.expander("Score / Tier Summary", expanded=True):
                 if latest_score:
                     m1, m2, m3 = st.columns(3)
                     m1.metric("Total Score", latest_score.total_score)
                     m2.metric("Tier", latest_score.tier)
                     m3.metric("Gate", latest_score.gate_result)
-                    st.json(latest_score.component_breakdown)
+                    with st.expander("Score Breakdown Details"):
+                        st.json(latest_score.component_breakdown)
                 else:
                     st.info("No score computed yet.")
 
-            with st.expander(f"Evidence ({len(detail['evidence'])} items)"):
+            with st.expander(f"Award Evidence ({len(detail['evidence'])} items)"):
                 for ev in detail["evidence"]:
                     fields = ev.extracted_fields or {}
                     action_type = fields.get("action_type")
@@ -165,7 +180,7 @@ elif page == "Lead Detail":
             with st.expander(f"Signals ({len(detail['signals'])} items)"):
                 for sig in detail["signals"]:
                     award = (
-                        f" (${float(sig.award_amount):,.0f})"
+                        f" ({format_currency(sig.award_amount)})"
                         if sig.award_amount
                         else ""
                     )
@@ -180,23 +195,15 @@ elif page == "Lead Detail":
                     gate_summary = get_award_gate_summary(company.id, agg_db)
 
                 with st.expander(
-                    f"Award Aggregation ({agg['award_count']} transactions)", expanded=True
+                    f"Gate 10 Award Summary ({agg['award_count']} transactions)",
+                    expanded=True,
                 ):
                     st.markdown("**Gate 10 Award Summary** (signals, positive awards only)")
                     g1, g2, g3, g4, g5 = st.columns(5)
-                    g1.metric(
-                        "Largest Single",
-                        f"${float(gate_summary['largest_single']):,.0f}",
-                    )
-                    g2.metric(
-                        "90-Day Total",
-                        f"${float(gate_summary['recent_total_90d']):,.0f}",
-                    )
+                    g1.metric("Largest Single", format_currency(gate_summary["largest_single"]))
+                    g2.metric("90-Day Total", format_currency(gate_summary["recent_total_90d"]))
                     g3.metric("Positive Awards", gate_summary["positive_count"])
-                    g4.metric(
-                        "Most Recent",
-                        str(gate_summary["most_recent_date"]) if gate_summary["most_recent_date"] else "—",
-                    )
+                    g4.metric("Most Recent", format_date(gate_summary["most_recent_date"]))
                     g5.metric("Pass Type", gate_summary["pass_type"])
                     st.divider()
 
@@ -204,15 +211,9 @@ elif page == "Lead Detail":
                         st.info("No award amounts found in evidence.")
                     else:
                         m1, m2, m3 = st.columns(3)
-                        m1.metric(
-                            "Total Awarded",
-                            f"${float(agg['total_amount']):,.0f}",
-                        )
+                        m1.metric("Total Awarded", format_currency(agg["total_amount"]))
                         m2.metric("Transactions", agg["award_count"])
-                        m3.metric(
-                            "Avg Award Size",
-                            f"${float(agg['avg_amount']):,.0f}",
-                        )
+                        m3.metric("Avg Award Size", format_currency(agg["avg_amount"]))
 
                         if agg["by_year"]:
                             st.markdown("**By Year**")
@@ -224,7 +225,7 @@ elif page == "Lead Detail":
                                 c = st.columns([1, 1, 2])
                                 c[0].write(str(row["year"]))
                                 c[1].write(str(row["count"]))
-                                c[2].write(f"${float(row['total']):,.0f}")
+                                c[2].write(format_currency(row["total"]))
 
                         if agg["by_agency"]:
                             st.markdown("**Top Awarding Agencies**")
@@ -232,7 +233,7 @@ elif page == "Lead Detail":
                                 st.write(
                                     f"- {row['agency']}: "
                                     f"{row['count']} award(s), "
-                                    f"${float(row['total']):,.0f}"
+                                    f"{format_currency(row['total'])}"
                                 )
 
                         if agg["by_action_type"]:
@@ -241,7 +242,7 @@ elif page == "Lead Detail":
                                 st.write(
                                     f"- {row['action_type']}: "
                                     f"{row['count']} award(s), "
-                                    f"${float(row['total']):,.0f}"
+                                    f"{format_currency(row['total'])}"
                                 )
 
             with st.expander(
@@ -256,24 +257,30 @@ elif page == "Lead Detail":
                         st.write(f"  > {dec.note}")
 
             # ── Review Actions ─────────────────────────────────────────────────
-            st.subheader("Record a Decision")
-            if not reviewer_id:
-                st.warning(
-                    "Review actions are disabled — no authenticated identity. "
-                    "Run behind Caddy so X-Forwarded-Email is present."
-                )
-            else:
-                action = st.selectbox("Action", sorted(VALID_ACTIONS))
-                note_text = st.text_area("Note (optional)")
+            st.divider()
+            with st.container():
+                st.subheader("Record a Decision")
+                if not reviewer_id:
+                    st.warning(
+                        "Review actions are disabled — no authenticated identity. "
+                        "Run behind Caddy so X-Forwarded-Email is present."
+                    )
+                else:
+                    st.info(
+                        "This records a human decision only. "
+                        "No automatic outreach, Salesforce update, or lead status change will occur."
+                    )
+                    action = st.selectbox("Action", sorted(VALID_ACTIONS))
+                    note_text = st.text_area("Note (optional)")
 
-                if st.button("Submit Decision"):
-                    with SessionLocal() as db:
-                        create_review_decision(
-                            lead_candidate_id=lead_id,
-                            action=action,
-                            note=note_text or None,
-                            reviewer_id=reviewer_id,
-                            db=db,
-                        )
-                    st.success(f"Decision '{action}' recorded.")
-                    st.rerun()
+                    if st.button("Submit Decision"):
+                        with SessionLocal() as db:
+                            create_review_decision(
+                                lead_candidate_id=lead_id,
+                                action=action,
+                                note=note_text or None,
+                                reviewer_id=reviewer_id,
+                                db=db,
+                            )
+                        st.success(f"Decision '{action}' recorded.")
+                        st.rerun()
