@@ -15,7 +15,7 @@ import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.db.session import SessionLocal
-from app.ops.lead_quality import BUCKET_KEYS, build_report, get_action_type_distribution
+from app.ops.lead_quality import BUCKET_KEYS, build_report, get_action_type_distribution, get_company_award_aggregation
 
 
 # ─── Formatting helpers ───────────────────────────────────────────────────────
@@ -133,6 +133,33 @@ def _print_tiny_awards(report) -> None:
         print()
 
 
+def _print_company_award_aggregation(report) -> None:
+    _section(
+        "COMPANY AWARD AGGREGATION  "
+        "(active lead_candidates, positive awards only, signals table)"
+    )
+    if not report.company_award_aggregation:
+        print("  (no active lead candidates with award data)")
+        return
+    print(
+        f"  {'Company':<40} {'Tier':<8} {'Pos':>4}  "
+        f"{'Largest Single':>16}  {'90d Total':>14}  "
+        f"{'Lifetime':>14}  {'Most Recent':<12}  Pass Type"
+    )
+    print("  " + "-" * 130)
+    for row in report.company_award_aggregation:
+        tier = row["tier"] or "—"
+        largest = f"${row['largest_single']:,.0f}" if row["largest_single"] else "—"
+        recent = f"${row['recent_total_90d']:,.0f}" if row["recent_total_90d"] else "—"
+        lifetime = f"${row['lifetime_total']:,.0f}" if row["lifetime_total"] is not None else "—"
+        most_recent = row["most_recent_date"] or "—"
+        print(
+            f"  {row['canonical_name']:<40} {tier:<8} {row['positive_count']:>4}  "
+            f"{largest:>16}  {recent:>14}  "
+            f"{lifetime:>14}  {most_recent:<12}  {row['pass_type']}"
+        )
+
+
 def _print_action_types(report) -> None:
     _section("USASPENDING ACTION TYPES  (evidence_items WHERE claim = 'CONTRACT_AWARD')")
     if not report.action_type_distribution:
@@ -168,6 +195,7 @@ def main() -> None:
     _print_multi_award(report)
     _print_tiny_awards(report)
     _print_action_types(report)
+    _print_company_award_aggregation(report)
 
     print()
     print(_sep("="))

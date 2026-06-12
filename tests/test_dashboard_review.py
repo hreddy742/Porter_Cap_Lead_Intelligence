@@ -22,7 +22,7 @@ from __future__ import annotations
 import importlib
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -30,6 +30,7 @@ import pytest
 from app.dashboard.review import (
     create_review_decision,
     get_award_aggregation,
+    get_award_gate_summary,
     get_lead_detail,
     get_latest_review_action,
     get_reviewer_id,
@@ -619,3 +620,125 @@ def test_get_award_aggregation_missing_agency_fallback():
     result = get_award_aggregation(company_id, db)
 
     assert result["by_agency"][0]["agency"] == "Unknown"
+
+
+# ─── Tests 23-28: get_award_gate_summary ─────────────────────────────────────
+
+
+def _make_signal(award_amount, signal_date) -> MagicMock:
+    sig = MagicMock(spec=Signal)
+    sig.award_amount = award_amount
+    sig.signal_date = signal_date
+    return sig
+
+
+def _db_returning_signals(signals: list) -> MagicMock:
+    db = MagicMock()
+    db.execute.return_value.scalars.return_value.all.return_value = signals
+    return db
+
+
+# ─── Test 23: no signals → zeros and unknown ─────────────────────────────────
+
+
+def test_get_award_gate_summary_empty():
+    from decimal import Decimal
+
+    result = get_award_gate_summary(uuid.uuid4(), _db_returning_signals([]))
+
+    assert result["positive_count"] == 0
+    assert result["largest_single"] == Decimal("0")
+    assert result["recent_total_90d"] == Decimal("0")
+    assert result["most_recent_date"] is None
+    assert result["pass_type"] == "unknown"
+
+
+# ─── Test 24: large single award → single_award_pass ─────────────────────────
+
+
+def test_get_award_gate_summary_single_award_pass():
+    from decimal import Decimal
+
+    today = date.today()
+    sig = _make_signal(Decimal("250000"), today)
+    result = get_award_gate_summary(uuid.uuid4(), _db_returning_signals([sig]))
+
+    assert result["positive_count"] == 1
+    assert result["largest_single"] == Decimal("250000")
+    assert result["pass_type"] == "single_award_pass"
+    assert result["most_recent_date"] == today
+
+
+# ─── Test 25: multiple small recent awards summing to ≥10k → aggregate_90d_pass
+
+
+def test_get_award_gate_summary_aggregate_90d_pass():
+    from decimal import Decimal
+
+    today = date.today()
+    signals = [
+        _make_signal(Decimal("4000"), today - timedelta(days=10)),
+        _make_signal(Decimal("4000"), today - timedelta(days=20)),
+        _make_signal(Decimal("4000"), today - timedelta(days=30)),
+    ]
+    result = get_award_gate_summary(uuid.uuid4(), _db_returning_signals(signals))
+
+    assert result["positive_count"] == 3
+    assert result["largest_single"] == Decimal("4000")
+    assert result["recent_total_90d"] == Decimal("12000")
+    assert result["pass_type"] == "aggregate_90d_pass"
+
+
+# ─── Test 26: positive awards but both below threshold → below_threshold ──────
+
+
+def test_get_award_gate_summary_below_threshold():
+    from decimal import Decimal
+
+    today = date.today()
+    sig = _make_signal(Decimal("500"), today - timedelta(days=5))
+    result = get_award_gate_summary(uuid.uuid4(), _db_returning_signals([sig]))
+
+    assert result["positive_count"] == 1
+    assert result["pass_type"] == "below_threshold"
+
+
+# ─── Test 27: old awards excluded from 90-day total ──────────────────────────
+
+
+def test_get_award_gate_summary_90d_excludes_old_awards():
+    from decimal import Decimal
+
+    today = date.today()
+    recent = _make_signal(Decimal("5000"), today - timedelta(days=30))
+    old = _make_signal(Decimal("50000"), today - timedelta(days=120))
+    result = get_award_gate_summary(uuid.uuid4(), _db_returning_signals([recent, old]))
+
+    # largest_single includes all positive awards (including the old one)
+    assert result["largest_single"] == Decimal("50000")
+    # 90d total only counts the recent award — old one is excluded
+    assert result["recent_total_90d"] == Decimal("5000")
+    # both signals are positive
+    assert result["positive_count"] == 2
+    # $50,000 >= $10,000 single threshold → single_award_pass
+    assert result["pass_type"] == "single_award_pass"
+
+
+# ─── Test 28: zero and negative awards are ignored ────────────────────────────
+
+
+def test_get_award_gate_summary_ignores_zero_and_negative():
+    from decimal import Decimal
+
+    today = date.today()
+    signals = [
+        _make_signal(Decimal("0"), today),
+        _make_signal(Decimal("-500"), today),
+        _make_signal(None, today),
+        _make_signal(Decimal("15000"), today),
+    ]
+    result = get_award_gate_summary(uuid.uuid4(), _db_returning_signals(signals))
+
+    assert result["positive_count"] == 1
+    assert result["largest_single"] == Decimal("15000")
+    assert result["pass_type"] == "single_award_pass"

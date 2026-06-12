@@ -28,6 +28,7 @@ from app.ops.lead_quality import (
     count_raw_source_records,
     get_action_type_distribution,
     get_award_buckets,
+    get_company_award_aggregation,
     get_multi_award_companies,
     get_tier_counts,
     get_tiny_award_examples,
@@ -416,6 +417,74 @@ class TestGetActionTypeDistribution:
         assert result[2]["action_type"] == "unknown"
 
 
+# ─── get_company_award_aggregation ───────────────────────────────────────────
+
+AggRow = namedtuple(
+    "AggRow",
+    [
+        "canonical_name", "tier",
+        "positive_count", "largest_single",
+        "recent_total_90d", "lifetime_total", "most_recent_date",
+    ],
+)
+
+
+class TestGetCompanyAwardAggregation:
+    def _db_with_rows(self, rows):
+        db = MagicMock()
+        db.execute.return_value.fetchall.return_value = rows
+        return db
+
+    def test_empty_returns_empty_list(self):
+        assert get_company_award_aggregation(self._db_with_rows([])) == []
+
+    def test_single_company_single_award_pass(self):
+        rows = [AggRow("Acme Federal", "warm", 1, Decimal("250000"), Decimal("250000"), Decimal("250000"), "2024-03-01")]
+        result = get_company_award_aggregation(self._db_with_rows(rows))
+        assert len(result) == 1
+        r = result[0]
+        assert r["canonical_name"] == "Acme Federal"
+        assert r["tier"] == "warm"
+        assert r["positive_count"] == 1
+        assert r["largest_single"] == pytest.approx(250000.0)
+        assert r["recent_total_90d"] == pytest.approx(250000.0)
+        assert r["lifetime_total"] == pytest.approx(250000.0)
+        assert r["most_recent_date"] == "2024-03-01"
+        assert r["pass_type"] == "single_award_pass"
+
+    def test_aggregate_90d_pass_when_single_below_threshold(self):
+        # largest_single < 10000, but recent_total_90d >= 10000
+        rows = [AggRow("Small Co", "cold", 3, Decimal("5000"), Decimal("15000"), Decimal("15000"), "2024-02-01")]
+        result = get_company_award_aggregation(self._db_with_rows(rows))
+        assert result[0]["pass_type"] == "aggregate_90d_pass"
+
+    def test_below_threshold_when_both_low(self):
+        rows = [AggRow("Tiny Co", "cold", 2, Decimal("4000"), Decimal("4000"), Decimal("8000"), "2024-01-15")]
+        result = get_company_award_aggregation(self._db_with_rows(rows))
+        assert result[0]["pass_type"] == "below_threshold"
+
+    def test_unknown_when_no_positive_awards(self):
+        # positive_count = 0 means all signals were zero/negative/null
+        rows = [AggRow("No Award Co", None, 0, None, None, None, None)]
+        result = get_company_award_aggregation(self._db_with_rows(rows))
+        assert result[0]["pass_type"] == "unknown"
+        assert result[0]["positive_count"] == 0
+        assert result[0]["largest_single"] == pytest.approx(0.0)
+        assert result[0]["recent_total_90d"] == pytest.approx(0.0)
+        assert result[0]["lifetime_total"] is None
+        assert result[0]["most_recent_date"] is None
+
+    def test_null_tier_preserved(self):
+        rows = [AggRow("Unscored Co", None, 1, Decimal("50000"), Decimal("50000"), Decimal("50000"), "2024-03-01")]
+        result = get_company_award_aggregation(self._db_with_rows(rows))
+        assert result[0]["tier"] is None
+
+    def test_lifetime_total_none_when_no_positive(self):
+        rows = [AggRow("Zero Co", "cold", 0, None, None, None, None)]
+        result = get_company_award_aggregation(self._db_with_rows(rows))
+        assert result[0]["lifetime_total"] is None
+
+
 # ─── build_report ─────────────────────────────────────────────────────────────
 
 class TestBuildReport:
@@ -424,6 +493,10 @@ class TestBuildReport:
         db = MagicMock()
         _action_type_data = [{"action_type": "A", "action_type_description": "Original", "count": 10,
                                "total_award_amount": 500000.0, "avg_award_amount": 50000.0, "tiny_award_count": 2}]
+        _agg_data = [{"canonical_name": "Acme", "tier": "warm", "positive_count": 1,
+                      "largest_single": 250000.0, "recent_total_90d": 250000.0,
+                      "lifetime_total": 250000.0, "most_recent_date": "2024-03-01",
+                      "pass_type": "single_award_pass"}]
 
         with (
             patch("app.ops.lead_quality.count_raw_source_records", return_value=50),
@@ -437,6 +510,7 @@ class TestBuildReport:
             patch("app.ops.lead_quality.get_multi_award_companies", return_value=[]),
             patch("app.ops.lead_quality.get_tiny_award_examples", return_value=[]),
             patch("app.ops.lead_quality.get_action_type_distribution", return_value=_action_type_data),
+            patch("app.ops.lead_quality.get_company_award_aggregation", return_value=_agg_data),
         ):
             report = build_report(db)
 
@@ -452,3 +526,4 @@ class TestBuildReport:
         assert report.multi_award_companies == []
         assert report.tiny_award_examples == []
         assert report.action_type_distribution == _action_type_data
+        assert report.company_award_aggregation == _agg_data

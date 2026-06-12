@@ -11,7 +11,9 @@ Auth rule: reviewer_id must come from get_reviewer_id(), never from a form field
 """
 from __future__ import annotations
 
+import os
 import uuid
+from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
@@ -272,4 +274,78 @@ def get_award_aggregation(company_id: UUID, db: Session) -> dict:
         "by_year": by_year,
         "by_agency": by_agency,
         "by_action_type": by_action_type,
+    }
+
+
+def get_award_gate_summary(company_id: UUID, db: Session) -> dict:
+    """Gate 10-style award summary for a single company, read from the signals table.
+
+    Exposes the same values Gate 10 evaluates so reviewers can understand
+    why a company passed or failed Gate 10. Display-only — never used for
+    scoring, gating, tiering, or archiving.
+
+    Only positive award amounts count (zero/negative/null excluded).
+    90-day total uses signal_date >= today - 90 days.
+    pass_type uses the same env-var thresholds as Gate 10 (default 10 000).
+
+    Keys:
+        positive_count   – int
+        largest_single   – Decimal (0 if no positive signals)
+        recent_total_90d – Decimal (0 if no recent positive signals)
+        most_recent_date – date | None
+        pass_type        – "single_award_pass" | "aggregate_90d_pass" |
+                           "below_threshold" | "unknown"
+    """
+    _min_single = Decimal(os.getenv("MIN_QUALIFYING_SINGLE_AWARD_AMOUNT", "10000"))
+    _min_90d = Decimal(os.getenv("MIN_QUALIFYING_COMPANY_90D_AWARD_TOTAL", "10000"))
+
+    stmt = (
+        select(Signal)
+        .where(
+            Signal.company_id == company_id,
+            Signal.signal_type == "CONTRACT_AWARD",
+        )
+    )
+    signals = list(db.execute(stmt).scalars().all())
+
+    cutoff = date.today() - timedelta(days=90)
+    largest_single = Decimal("0")
+    recent_total_90d = Decimal("0")
+    most_recent_date = None
+    positive_count = 0
+
+    for sig in signals:
+        raw = sig.award_amount
+        if raw is None:
+            continue
+        try:
+            amt = Decimal(str(raw))
+        except (InvalidOperation, ValueError, TypeError):
+            continue
+        if amt <= 0:
+            continue
+
+        positive_count += 1
+        if amt > largest_single:
+            largest_single = amt
+        if isinstance(sig.signal_date, date) and sig.signal_date >= cutoff:
+            recent_total_90d += amt
+        if most_recent_date is None or sig.signal_date > most_recent_date:
+            most_recent_date = sig.signal_date
+
+    if positive_count == 0:
+        pass_type = "unknown"
+    elif largest_single >= _min_single:
+        pass_type = "single_award_pass"
+    elif recent_total_90d >= _min_90d:
+        pass_type = "aggregate_90d_pass"
+    else:
+        pass_type = "below_threshold"
+
+    return {
+        "positive_count": positive_count,
+        "largest_single": largest_single,
+        "recent_total_90d": recent_total_90d,
+        "most_recent_date": most_recent_date,
+        "pass_type": pass_type,
     }
