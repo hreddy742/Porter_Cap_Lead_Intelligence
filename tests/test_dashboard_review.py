@@ -29,6 +29,8 @@ import pytest
 
 from app.dashboard.review import (
     create_review_decision,
+    format_currency,
+    format_date,
     get_award_aggregation,
     get_award_gate_summary,
     get_lead_detail,
@@ -742,3 +744,33 @@ def test_get_award_gate_summary_ignores_zero_and_negative():
     assert result["positive_count"] == 1
     assert result["largest_single"] == Decimal("15000")
     assert result["pass_type"] == "single_award_pass"
+
+
+# ─── Tests 29-33: format_currency and format_date ────────────────────────────
+
+
+def test_format_currency_none_returns_not_available():
+    assert format_currency(None) == "Not available"
+
+
+def test_format_currency_zero_returns_dollar_zero():
+    from decimal import Decimal
+
+    assert format_currency(0) == "$0"
+    assert format_currency(Decimal("0")) == "$0"
+
+
+def test_format_currency_decimal_formats_clearly():
+    from decimal import Decimal
+
+    result = format_currency(Decimal("1234.56"))
+    assert result == "$1,235"
+
+
+def test_format_date_none_returns_not_available():
+    assert format_date(None) == "Not available"
+
+
+def test_format_date_date_object_returns_readable_string():
+    result = format_date(date(2024, 3, 15))
+    assert result == "2024-03-15"

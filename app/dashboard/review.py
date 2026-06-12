@@ -349,3 +349,21 @@ def get_award_gate_summary(company_id: UUID, db: Session) -> dict:
         "most_recent_date": most_recent_date,
         "pass_type": pass_type,
     }
+
+
+def format_currency(value) -> str:
+    """Return a formatted USD string. None → 'Not available'. Zero → '$0'."""
+    if value is None:
+        return "Not available"
+    try:
+        amount = Decimal(str(value))
+    except (InvalidOperation, TypeError, ValueError):
+        return "Not available"
+    return f"${float(amount):,.0f}"
+
+
+def format_date(value) -> str:
+    """Return a readable date string. None → 'Not available'."""
+    if value is None:
+        return "Not available"
+    return str(value)
