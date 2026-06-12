@@ -10,6 +10,7 @@ Note on lead_candidates.tier: the column is named `tier` in the schema
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from decimal import Decimal
 
@@ -73,6 +74,7 @@ class LeadQualityReport:
     multi_award_companies: list[dict] = field(default_factory=list)
     tiny_award_examples: list[dict] = field(default_factory=list)
     action_type_distribution: list[dict] = field(default_factory=list)
+    company_award_aggregation: list[dict] = field(default_factory=list)
 
 
 # ─── Individual query functions ───────────────────────────────────────────────
@@ -350,6 +352,79 @@ def get_action_type_distribution(db: Session) -> list[dict]:
     ]
 
 
+# ─── Company award aggregation ────────────────────────────────────────────────
+
+def get_company_award_aggregation(db: Session, limit: int = 20) -> list[dict]:
+    """Per-company award aggregation for active lead candidates only.
+
+    Scope: lead_candidates WHERE status='active' AND deleted_at IS NULL,
+           joined with companies WHERE deleted_at IS NULL.
+    Only positive award amounts count (zero/negative/null excluded).
+    90-day total: signal_date >= CURRENT_DATE - 90 days.
+    pass_type mirrors Gate 10 logic — display-only, never used for scoring or gating.
+
+    Returns up to `limit` rows ordered by lifetime_total DESC NULLS LAST.
+    """
+    _min_single = Decimal(os.getenv("MIN_QUALIFYING_SINGLE_AWARD_AMOUNT", "10000"))
+    _min_90d = Decimal(os.getenv("MIN_QUALIFYING_COMPANY_90D_AWARD_TOTAL", "10000"))
+
+    rows = db.execute(
+        text("""
+            SELECT
+              c.canonical_name,
+              lc.tier,
+              COUNT(s.id)         FILTER (WHERE s.award_amount > 0)                AS positive_count,
+              MAX(s.award_amount)  FILTER (WHERE s.award_amount > 0)               AS largest_single,
+              SUM(s.award_amount)  FILTER (
+                WHERE s.award_amount > 0
+                  AND s.signal_date >= CURRENT_DATE - (90 * INTERVAL '1 day')
+              )                                                                     AS recent_total_90d,
+              SUM(s.award_amount)  FILTER (WHERE s.award_amount > 0)               AS lifetime_total,
+              MAX(s.signal_date)                                                    AS most_recent_date
+            FROM lead_candidates lc
+            JOIN companies c ON c.id = lc.company_id
+            LEFT JOIN signals s
+              ON s.company_id = lc.company_id
+              AND s.signal_type = 'CONTRACT_AWARD'
+            WHERE lc.status = 'active'
+              AND lc.deleted_at IS NULL
+              AND c.deleted_at IS NULL
+            GROUP BY c.canonical_name, lc.tier, lc.id
+            ORDER BY lifetime_total DESC NULLS LAST
+            LIMIT :lim
+        """),
+        {"lim": limit},
+    ).fetchall()
+
+    result = []
+    for row in rows:
+        positive_count = int(row.positive_count) if row.positive_count else 0
+        largest = Decimal(str(row.largest_single)) if row.largest_single is not None else Decimal("0")
+        recent = Decimal(str(row.recent_total_90d)) if row.recent_total_90d is not None else Decimal("0")
+
+        if positive_count == 0:
+            pass_type = "unknown"
+        elif largest >= _min_single:
+            pass_type = "single_award_pass"
+        elif recent >= _min_90d:
+            pass_type = "aggregate_90d_pass"
+        else:
+            pass_type = "below_threshold"
+
+        result.append({
+            "canonical_name": row.canonical_name,
+            "tier": row.tier,
+            "positive_count": positive_count,
+            "largest_single": float(largest),
+            "recent_total_90d": float(recent),
+            "lifetime_total": float(row.lifetime_total) if row.lifetime_total is not None else None,
+            "most_recent_date": str(row.most_recent_date) if row.most_recent_date is not None else None,
+            "pass_type": pass_type,
+        })
+
+    return result
+
+
 # ─── Report builder ───────────────────────────────────────────────────────────
 
 def build_report(db: Session) -> LeadQualityReport:
@@ -366,4 +441,5 @@ def build_report(db: Session) -> LeadQualityReport:
         multi_award_companies=get_multi_award_companies(db),
         tiny_award_examples=get_tiny_award_examples(db),
         action_type_distribution=get_action_type_distribution(db),
+        company_award_aggregation=get_company_award_aggregation(db),
     )

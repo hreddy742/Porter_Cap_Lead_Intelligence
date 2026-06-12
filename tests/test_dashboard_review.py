@@ -22,13 +22,15 @@ from __future__ import annotations
 import importlib
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from app.dashboard.review import (
     create_review_decision,
+    get_award_aggregation,
+    get_award_gate_summary,
     get_lead_detail,
     get_latest_review_action,
     get_reviewer_id,
@@ -473,3 +475,270 @@ def test_get_lead_detail_evidence_exposes_deep_link_source_url():
         "evidence source_url must not be the homepage"
     )
     assert "CONT_AWD" in url, "evidence source_url must contain the award key"
+
+
+# ─── Tests 17-22: get_award_aggregation ──────────────────────────────────────
+
+
+def _make_evidence(extracted_fields: dict) -> MagicMock:
+    ev = MagicMock(spec=EvidenceItem)
+    ev.claim_supported = "CONTRACT_AWARD"
+    ev.extracted_fields = extracted_fields
+    return ev
+
+
+def _db_returning(items: list) -> MagicMock:
+    db = MagicMock()
+    db.execute.return_value.scalars.return_value.all.return_value = items
+    return db
+
+
+# ─── Test 17: empty evidence → all zeros ──────────────────────────────────────
+
+
+def test_get_award_aggregation_empty():
+    company_id = uuid.uuid4()
+    db = _db_returning([])
+
+    result = get_award_aggregation(company_id, db)
+
+    assert result["award_count"] == 0
+    assert result["total_amount"] == 0
+    assert result["avg_amount"] == 0
+    assert result["by_year"] == []
+    assert result["by_agency"] == []
+    assert result["by_action_type"] == []
+
+
+# ─── Test 18: single award ────────────────────────────────────────────────────
+
+
+def test_get_award_aggregation_single_award():
+    from decimal import Decimal
+
+    company_id = uuid.uuid4()
+    ev = _make_evidence({
+        "award_amount": "500000",
+        "action_date": "2024-03-15",
+        "awarding_agency": "Dept of Defense",
+        "action_type": "A",
+        "action_type_description": "Initial Contract",
+    })
+    db = _db_returning([ev])
+
+    result = get_award_aggregation(company_id, db)
+
+    assert result["award_count"] == 1
+    assert result["total_amount"] == Decimal("500000")
+    assert result["avg_amount"] == Decimal("500000")
+    assert result["by_year"] == [{"year": 2024, "count": 1, "total": Decimal("500000")}]
+    assert result["by_agency"][0]["agency"] == "Dept of Defense"
+    assert result["by_action_type"][0]["action_type"] == "Initial Contract"
+
+
+# ─── Test 19: multiple awards — year breakdown ────────────────────────────────
+
+
+def test_get_award_aggregation_year_breakdown():
+    from decimal import Decimal
+
+    company_id = uuid.uuid4()
+    items = [
+        _make_evidence({"award_amount": "100000", "action_date": "2023-06-01", "awarding_agency": "GSA"}),
+        _make_evidence({"award_amount": "200000", "action_date": "2023-11-15", "awarding_agency": "GSA"}),
+        _make_evidence({"award_amount": "400000", "action_date": "2024-02-28", "awarding_agency": "GSA"}),
+    ]
+    db = _db_returning(items)
+
+    result = get_award_aggregation(company_id, db)
+
+    assert result["award_count"] == 3
+    assert result["total_amount"] == Decimal("700000")
+
+    years = {r["year"]: r for r in result["by_year"]}
+    assert years[2023]["count"] == 2
+    assert years[2023]["total"] == Decimal("300000")
+    assert years[2024]["count"] == 1
+    assert years[2024]["total"] == Decimal("400000")
+    # Most recent year first
+    assert result["by_year"][0]["year"] == 2024
+
+
+# ─── Test 20: agency grouping, top 10 cap ─────────────────────────────────────
+
+
+def test_get_award_aggregation_agency_grouping():
+    from decimal import Decimal
+
+    company_id = uuid.uuid4()
+    items = [
+        _make_evidence({"award_amount": "300000", "action_date": "2024-01-01", "awarding_agency": "DoD"}),
+        _make_evidence({"award_amount": "100000", "action_date": "2024-01-02", "awarding_agency": "GSA"}),
+        _make_evidence({"award_amount": "200000", "action_date": "2024-01-03", "awarding_agency": "DoD"}),
+    ]
+    db = _db_returning(items)
+
+    result = get_award_aggregation(company_id, db)
+
+    agencies = {r["agency"]: r for r in result["by_agency"]}
+    assert agencies["DoD"]["count"] == 2
+    assert agencies["DoD"]["total"] == Decimal("500000")
+    assert agencies["GSA"]["count"] == 1
+    # Sorted by total descending — DoD first
+    assert result["by_agency"][0]["agency"] == "DoD"
+
+
+# ─── Test 21: missing/invalid award_amount fields are skipped ─────────────────
+
+
+def test_get_award_aggregation_skips_invalid_amounts():
+    from decimal import Decimal
+
+    company_id = uuid.uuid4()
+    items = [
+        _make_evidence({"award_amount": None, "action_date": "2024-01-01"}),
+        _make_evidence({"award_amount": "not_a_number", "action_date": "2024-01-02"}),
+        _make_evidence({"award_amount": "-500", "action_date": "2024-01-03"}),
+        _make_evidence({"award_amount": "250000", "action_date": "2024-01-04"}),
+    ]
+    db = _db_returning(items)
+
+    result = get_award_aggregation(company_id, db)
+
+    assert result["award_count"] == 1
+    assert result["total_amount"] == Decimal("250000")
+
+
+# ─── Test 22: missing awarding_agency falls back to "Unknown" ─────────────────
+
+
+def test_get_award_aggregation_missing_agency_fallback():
+    company_id = uuid.uuid4()
+    ev = _make_evidence({"award_amount": "100000", "action_date": "2024-05-01"})
+    db = _db_returning([ev])
+
+    result = get_award_aggregation(company_id, db)
+
+    assert result["by_agency"][0]["agency"] == "Unknown"
+
+
+# ─── Tests 23-28: get_award_gate_summary ─────────────────────────────────────
+
+
+def _make_signal(award_amount, signal_date) -> MagicMock:
+    sig = MagicMock(spec=Signal)
+    sig.award_amount = award_amount
+    sig.signal_date = signal_date
+    return sig
+
+
+def _db_returning_signals(signals: list) -> MagicMock:
+    db = MagicMock()
+    db.execute.return_value.scalars.return_value.all.return_value = signals
+    return db
+
+
+# ─── Test 23: no signals → zeros and unknown ─────────────────────────────────
+
+
+def test_get_award_gate_summary_empty():
+    from decimal import Decimal
+
+    result = get_award_gate_summary(uuid.uuid4(), _db_returning_signals([]))
+
+    assert result["positive_count"] == 0
+    assert result["largest_single"] == Decimal("0")
+    assert result["recent_total_90d"] == Decimal("0")
+    assert result["most_recent_date"] is None
+    assert result["pass_type"] == "unknown"
+
+
+# ─── Test 24: large single award → single_award_pass ─────────────────────────
+
+
+def test_get_award_gate_summary_single_award_pass():
+    from decimal import Decimal
+
+    today = date.today()
+    sig = _make_signal(Decimal("250000"), today)
+    result = get_award_gate_summary(uuid.uuid4(), _db_returning_signals([sig]))
+
+    assert result["positive_count"] == 1
+    assert result["largest_single"] == Decimal("250000")
+    assert result["pass_type"] == "single_award_pass"
+    assert result["most_recent_date"] == today
+
+
+# ─── Test 25: multiple small recent awards summing to ≥10k → aggregate_90d_pass
+
+
+def test_get_award_gate_summary_aggregate_90d_pass():
+    from decimal import Decimal
+
+    today = date.today()
+    signals = [
+        _make_signal(Decimal("4000"), today - timedelta(days=10)),
+        _make_signal(Decimal("4000"), today - timedelta(days=20)),
+        _make_signal(Decimal("4000"), today - timedelta(days=30)),
+    ]
+    result = get_award_gate_summary(uuid.uuid4(), _db_returning_signals(signals))
+
+    assert result["positive_count"] == 3
+    assert result["largest_single"] == Decimal("4000")
+    assert result["recent_total_90d"] == Decimal("12000")
+    assert result["pass_type"] == "aggregate_90d_pass"
+
+
+# ─── Test 26: positive awards but both below threshold → below_threshold ──────
+
+
+def test_get_award_gate_summary_below_threshold():
+    from decimal import Decimal
+
+    today = date.today()
+    sig = _make_signal(Decimal("500"), today - timedelta(days=5))
+    result = get_award_gate_summary(uuid.uuid4(), _db_returning_signals([sig]))
+
+    assert result["positive_count"] == 1
+    assert result["pass_type"] == "below_threshold"
+
+
+# ─── Test 27: old awards excluded from 90-day total ──────────────────────────
+
+
+def test_get_award_gate_summary_90d_excludes_old_awards():
+    from decimal import Decimal
+
+    today = date.today()
+    recent = _make_signal(Decimal("5000"), today - timedelta(days=30))
+    old = _make_signal(Decimal("50000"), today - timedelta(days=120))
+    result = get_award_gate_summary(uuid.uuid4(), _db_returning_signals([recent, old]))
+
+    # largest_single includes all positive awards (including the old one)
+    assert result["largest_single"] == Decimal("50000")
+    # 90d total only counts the recent award — old one is excluded
+    assert result["recent_total_90d"] == Decimal("5000")
+    # both signals are positive
+    assert result["positive_count"] == 2
+    # $50,000 >= $10,000 single threshold → single_award_pass
+    assert result["pass_type"] == "single_award_pass"
+
+
+# ─── Test 28: zero and negative awards are ignored ────────────────────────────
+
+
+def test_get_award_gate_summary_ignores_zero_and_negative():
+    from decimal import Decimal
+
+    today = date.today()
+    signals = [
+        _make_signal(Decimal("0"), today),
+        _make_signal(Decimal("-500"), today),
+        _make_signal(None, today),
+        _make_signal(Decimal("15000"), today),
+    ]
+    result = get_award_gate_summary(uuid.uuid4(), _db_returning_signals(signals))
+
+    assert result["positive_count"] == 1
+    assert result["largest_single"] == Decimal("15000")
+    assert result["pass_type"] == "single_award_pass"
