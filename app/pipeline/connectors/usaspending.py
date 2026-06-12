@@ -57,8 +57,6 @@ _FIELDS = [
     "pop_state_code",
     "Awarding Agency",
     "generated_internal_id",
-    "Action Type",
-    "Action Type Description",
 ]
 
 _AWARD_TYPE_CODES = ["A", "B", "C", "D"]  # contracts only (excludes grants/loans)
@@ -309,6 +307,17 @@ class USASpendingConnector:
                         response=resp,
                     )
                     continue
+                if resp.status_code >= 400:
+                    try:
+                        error_snippet = resp.text[:500]
+                    except Exception:
+                        error_snippet = "<unreadable>"
+                    self._log.error(
+                        "usaspending_client_error",
+                        status_code=resp.status_code,
+                        response_snippet=error_snippet,
+                        page=page,
+                    )
                 resp.raise_for_status()
                 data = resp.json()
                 results: list[dict] = data.get("results", [])

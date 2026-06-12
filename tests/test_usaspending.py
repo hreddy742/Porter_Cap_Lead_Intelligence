@@ -74,6 +74,7 @@ def _award(n: int) -> dict:
 
 def _mock_response(results: list[dict], *, has_next: bool) -> MagicMock:
     resp = MagicMock()
+    resp.status_code = 200
     resp.raise_for_status.return_value = None
     resp.json.return_value = {
         "limit": 100,
@@ -376,6 +377,22 @@ def test_award_type_codes_sent_in_request_body():
 
 
 # ─── Test 12: generated_internal_id requested in API fields ──────────────────
+
+
+def test_invalid_fields_not_in_requested_fields():
+    """
+    'Action Type' and 'Action Type Description' are not valid field names for
+    spending_by_transaction and cause HTTP 400 when included.  Guard against
+    re-introduction.
+    """
+    from app.pipeline.connectors.usaspending import _FIELDS
+
+    assert "Action Type" not in _FIELDS, (
+        "'Action Type' is not a valid spending_by_transaction field — causes HTTP 400"
+    )
+    assert "Action Type Description" not in _FIELDS, (
+        "'Action Type Description' is not a valid spending_by_transaction field — causes HTTP 400"
+    )
 
 
 def test_generated_internal_id_in_requested_fields():
