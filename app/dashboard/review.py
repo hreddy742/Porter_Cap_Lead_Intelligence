@@ -12,6 +12,7 @@ Auth rule: reviewer_id must come from get_reviewer_id(), never from a form field
 from __future__ import annotations
 
 import uuid
+from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
 from sqlalchemy import select
@@ -172,3 +173,103 @@ def get_latest_review_action(
         .limit(1)
     )
     return db.execute(stmt).scalars().first()
+
+
+def get_award_aggregation(company_id: UUID, db: Session) -> dict:
+    """Aggregate CONTRACT_AWARD evidence for a company into summary statistics.
+
+    Reads extracted_fields from evidence_items; skips rows where award_amount or
+    action_date is missing/unparseable so partial data never crashes the dashboard.
+
+    Returns a dict with:
+        total_amount  – Decimal sum of all valid award amounts
+        award_count   – int number of evidence items with a valid award amount
+        avg_amount    – Decimal average (0 when award_count == 0)
+        by_year       – list of {"year": int, "count": int, "total": Decimal}
+                        sorted by year descending
+        by_agency     – list of {"agency": str, "count": int, "total": Decimal}
+                        sorted by total descending, top 10
+        by_action_type – list of {"action_type": str, "count": int, "total": Decimal}
+                         sorted by total descending
+    """
+    stmt = (
+        select(EvidenceItem)
+        .where(
+            EvidenceItem.company_id == company_id,
+            EvidenceItem.claim_supported == "CONTRACT_AWARD",
+        )
+        .order_by(EvidenceItem.captured_at.desc())
+    )
+    items = list(db.execute(stmt).scalars().all())
+
+    total_amount = Decimal("0")
+    award_count = 0
+    year_totals: dict[int, dict] = {}
+    agency_totals: dict[str, dict] = {}
+    action_type_totals: dict[str, dict] = {}
+
+    for item in items:
+        fields = item.extracted_fields or {}
+
+        raw_amount = fields.get("award_amount")
+        try:
+            amount = Decimal(str(raw_amount)) if raw_amount is not None else None
+        except (InvalidOperation, TypeError, ValueError):
+            amount = None
+
+        if amount is None or amount <= 0:
+            continue
+
+        award_count += 1
+        total_amount += amount
+
+        action_date_str = fields.get("action_date")
+        year: int | None = None
+        if action_date_str:
+            try:
+                year = int(str(action_date_str)[:4])
+            except (ValueError, TypeError):
+                pass
+
+        if year is not None:
+            entry = year_totals.setdefault(year, {"count": 0, "total": Decimal("0")})
+            entry["count"] += 1
+            entry["total"] += amount
+
+        agency = (fields.get("awarding_agency") or "").strip() or "Unknown"
+        a_entry = agency_totals.setdefault(agency, {"count": 0, "total": Decimal("0")})
+        a_entry["count"] += 1
+        a_entry["total"] += amount
+
+        action_type_raw = fields.get("action_type_description") or fields.get("action_type") or ""
+        action_type = action_type_raw.strip() or "Unknown"
+        at_entry = action_type_totals.setdefault(action_type, {"count": 0, "total": Decimal("0")})
+        at_entry["count"] += 1
+        at_entry["total"] += amount
+
+    avg_amount = (total_amount / award_count) if award_count else Decimal("0")
+
+    by_year = sorted(
+        [{"year": y, **v} for y, v in year_totals.items()],
+        key=lambda r: r["year"],
+        reverse=True,
+    )
+    by_agency = sorted(
+        [{"agency": a, **v} for a, v in agency_totals.items()],
+        key=lambda r: r["total"],
+        reverse=True,
+    )[:10]
+    by_action_type = sorted(
+        [{"action_type": t, **v} for t, v in action_type_totals.items()],
+        key=lambda r: r["total"],
+        reverse=True,
+    )
+
+    return {
+        "total_amount": total_amount,
+        "award_count": award_count,
+        "avg_amount": avg_amount,
+        "by_year": by_year,
+        "by_agency": by_agency,
+        "by_action_type": by_action_type,
+    }

@@ -24,6 +24,7 @@ import streamlit as st
 from app.dashboard.review import (
     VALID_ACTIONS,
     create_review_decision,
+    get_award_aggregation,
     get_lead_detail,
     get_reviewer_id,
     list_reviewable_leads,
@@ -171,6 +172,57 @@ elif page == "Lead Detail":
                         f"- **{sig.signal_type}** ({sig.signal_date}){award} "
                         f"— {sig.signal_strength}"
                     )
+
+            if company:
+                with SessionLocal() as agg_db:
+                    agg = get_award_aggregation(company.id, agg_db)
+
+                with st.expander(
+                    f"Award Aggregation ({agg['award_count']} transactions)", expanded=True
+                ):
+                    if agg["award_count"] == 0:
+                        st.info("No award amounts found in evidence.")
+                    else:
+                        m1, m2, m3 = st.columns(3)
+                        m1.metric(
+                            "Total Awarded",
+                            f"${float(agg['total_amount']):,.0f}",
+                        )
+                        m2.metric("Transactions", agg["award_count"])
+                        m3.metric(
+                            "Avg Award Size",
+                            f"${float(agg['avg_amount']):,.0f}",
+                        )
+
+                        if agg["by_year"]:
+                            st.markdown("**By Year**")
+                            year_cols = st.columns([1, 1, 2])
+                            year_cols[0].markdown("*Year*")
+                            year_cols[1].markdown("*Count*")
+                            year_cols[2].markdown("*Total*")
+                            for row in agg["by_year"]:
+                                c = st.columns([1, 1, 2])
+                                c[0].write(str(row["year"]))
+                                c[1].write(str(row["count"]))
+                                c[2].write(f"${float(row['total']):,.0f}")
+
+                        if agg["by_agency"]:
+                            st.markdown("**Top Awarding Agencies**")
+                            for row in agg["by_agency"]:
+                                st.write(
+                                    f"- {row['agency']}: "
+                                    f"{row['count']} award(s), "
+                                    f"${float(row['total']):,.0f}"
+                                )
+
+                        if agg["by_action_type"]:
+                            st.markdown("**By Action Type**")
+                            for row in agg["by_action_type"]:
+                                st.write(
+                                    f"- {row['action_type']}: "
+                                    f"{row['count']} award(s), "
+                                    f"${float(row['total']):,.0f}"
+                                )
 
             with st.expander(
                 f"Review History ({len(detail['review_history'])} decisions)"
