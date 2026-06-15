@@ -657,3 +657,59 @@ def test_remote_protocol_error_retries_then_succeeds():
     assert mock_client.post.call_count == 2, "should retry once after RemoteProtocolError"
     assert source_run.status == "completed"
     assert source_run.records_fetched == 1
+
+
+# ─── Test 23: default max_pages is 200 when env var is absent ────────────────
+
+
+def test_default_max_pages_is_200_when_env_var_absent():
+    """
+    When USASPENDING_MAX_PAGES is not set (or empty), max_pages must default
+    to 200 — not None (unlimited). This cap prevents server-side disconnects
+    on long-running pulls that fail around page 250.
+    """
+    with patch.dict(
+        "os.environ",
+        {
+            "USASPENDING_MAX_PAGES": "",
+            "USASPENDING_PAGE_LIMIT": "",
+            "USASPENDING_TIMEOUT_SECONDS": "",
+            "USASPENDING_MAX_RETRIES": "",
+            "USASPENDING_BACKOFF_BASE_SECONDS": "",
+            "USASPENDING_BACKOFF_MAX_SECONDS": "",
+        },
+    ):
+        connector = USASpendingConnector(
+            _make_session(), _make_source_run(), _make_source(), fiscal_year=2025
+        )
+
+    assert connector.max_pages == 200, (
+        "max_pages must default to 200 when env var is absent — "
+        "None (unlimited) is no longer the default"
+    )
+
+
+# ─── Test 24: env var override still works ────────────────────────────────────
+
+
+def test_max_pages_env_var_override_respected():
+    """
+    When USASPENDING_MAX_PAGES=5 is set, the connector uses 5, not 200.
+    Env var override must continue to work after the default changed from None.
+    """
+    with patch.dict(
+        "os.environ",
+        {
+            "USASPENDING_MAX_PAGES": "5",
+            "USASPENDING_PAGE_LIMIT": "",
+            "USASPENDING_TIMEOUT_SECONDS": "",
+            "USASPENDING_MAX_RETRIES": "",
+            "USASPENDING_BACKOFF_BASE_SECONDS": "",
+            "USASPENDING_BACKOFF_MAX_SECONDS": "",
+        },
+    ):
+        connector = USASpendingConnector(
+            _make_session(), _make_source_run(), _make_source(), fiscal_year=2025
+        )
+
+    assert connector.max_pages == 5, "explicit env var must override the 200 default"

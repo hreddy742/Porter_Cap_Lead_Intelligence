@@ -229,7 +229,9 @@ class USASpendingConnector:
         page_limit_raw = os.getenv("USASPENDING_PAGE_LIMIT")
         max_pages_raw = os.getenv("USASPENDING_MAX_PAGES")
         self.page_limit = int(page_limit_raw) if page_limit_raw else self.PAGE_LIMIT
-        self.max_pages = int(max_pages_raw) if max_pages_raw else None
+        # Default to 200 pages (20 000 records) to avoid long-running pulls
+        # that hit server-side disconnects on page 250+. Override via env var.
+        self.max_pages = int(max_pages_raw) if max_pages_raw else 200
 
         self.timeout = _env_float("USASPENDING_TIMEOUT_SECONDS", 30.0)
         self.max_retries = _env_int("USASPENDING_MAX_RETRIES", 3)
