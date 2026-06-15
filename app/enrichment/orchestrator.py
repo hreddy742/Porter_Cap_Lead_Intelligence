@@ -153,7 +153,15 @@ def _enrich_one(
         sam_match_status=sam_result.match_status if sam_result else None,
     )
 
-    notes = "robots_blocked=True" if contact_result.robots_blocked else None
+    # Notes double as a lightweight evidence trail. SAMResult has no source_url
+    # field, so the SAM.gov source URL (api_key omitted) is recorded here on a
+    # confirmed match — this is the one schema field that can hold it.
+    note_parts: list[str] = []
+    if sam_result and sam_result.match_status == "matched" and sam_result.uei:
+        note_parts.append(f"sam_source={SAMGovProvider.BASE_URL}?ueiSAM={sam_result.uei}")
+    if contact_result.robots_blocked:
+        note_parts.append("robots_blocked=True")
+    notes = "; ".join(note_parts) or None
     now = _utcnow()
 
     existing: CompanyContactability | None = db.execute(

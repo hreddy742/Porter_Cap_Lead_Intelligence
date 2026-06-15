@@ -21,6 +21,7 @@ from unittest.mock import MagicMock, call
 
 import pytest
 
+from app.db.models import CompanyContactability
 from app.enrichment.orchestrator import run_contactability_enrichment
 from app.enrichment.providers.base import SAMResult, WebsiteContactResult, WebsiteResult
 
@@ -192,3 +193,51 @@ def test_company_id_mode_uses_fetchone():
     assert result["dry_run"] is True
     assert result["companies_would_enrich"] == 1
     db.execute.return_value.fetchone.assert_called()
+
+
+# ── Test 10: source='sam' updates SAM fields via mocked provider ──────────────
+
+def test_apply_source_sam_updates_sam_fields():
+    rows = [_make_company_row(uei="ABC123DEF456")]
+    db = MagicMock()
+    db.execute.return_value.fetchall.return_value = rows
+    db.execute.return_value.scalar_one_or_none.return_value = None  # no existing CC
+
+    mock_sam = MagicMock()
+    mock_sam.lookup_entity.return_value = SAMResult(
+        uei="ABC123DEF456",
+        match_status="matched",
+        registration_status="Active",
+        address="100 Main St, Austin, TX, 78701, USA",
+    )
+    mock_search = MagicMock()
+
+    result = run_contactability_enrichment(
+        db=db,
+        limit=1,
+        tier="warm",
+        source="sam",
+        dry_run=False,
+        apply=True,
+        search_provider=mock_search,
+        sam_provider=mock_sam,
+    )
+
+    # SAM lookup ran; website search did NOT (source='sam').
+    mock_sam.lookup_entity.assert_called_once()
+    mock_search.find_company_website.assert_not_called()
+
+    # The persisted CompanyContactability carries the SAM fields.
+    cc = next(
+        c.args[0]
+        for c in db.add.call_args_list
+        if isinstance(c.args[0], CompanyContactability)
+    )
+    assert cc.sam_uei == "ABC123DEF456"
+    assert cc.sam_match_status == "matched"
+    assert cc.sam_registration_status == "Active"
+    assert cc.sam_address == "100 Main St, Austin, TX, 78701, USA"
+    assert cc.official_website is None  # website fields untouched for source='sam'
+    assert cc.contactability_status == "needs_paid_enrichment"  # SAM match, no website
+    assert "sam_source=" in (cc.contactability_notes or "")
+    assert result["companies_enriched"] == 1
