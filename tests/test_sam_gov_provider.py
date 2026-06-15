@@ -54,9 +54,15 @@ _NOT_FOUND_PAYLOAD = {"totalRecords": 0, "entityData": []}
 
 
 class _FakeResponse:
-    def __init__(self, status_code: int, json_data: dict | None = None):
+    def __init__(
+        self,
+        status_code: int,
+        json_data: dict | None = None,
+        headers: dict | None = None,
+    ):
         self.status_code = status_code
         self._json = json_data or {}
+        self.headers = headers or {}
 
     def json(self) -> dict:
         return self._json
@@ -165,6 +171,107 @@ def test_429_retries_then_succeeds(patched):
 
     assert result.match_status == "matched"
     assert client.calls == 2
+
+
+# ── 4b: 429 honours Retry-After header ───────────────────────────────────────────
+
+def test_429_with_retry_after_respected(monkeypatch):
+    monkeypatch.setenv("SAM_GOV_API_KEY", "test-key")
+    sleeps: list[float] = []
+    monkeypatch.setattr(sam_gov.time, "sleep", lambda s: sleeps.append(s))
+
+    client = _FakeClient(
+        [
+            _FakeResponse(429, headers={"Retry-After": "5"}),
+            _FakeResponse(200, _MATCHED_PAYLOAD),
+        ]
+    )
+    monkeypatch.setattr(sam_gov.httpx, "Client", lambda **_kw: client)
+
+    # High rate limit so per-minute pacing adds no meaningful sleep of its own.
+    result = SAMGovProvider(rate_limit_per_minute=100000).lookup_entity(_UEI)
+
+    assert result.match_status == "matched"
+    assert client.calls == 2
+    assert 5.0 in sleeps  # waited exactly the server-requested Retry-After
+
+
+# ── 4c: 429 exhausted → rate_limited (NOT error, NOT not_found) ──────────────────
+
+def test_429_exhausted_returns_rate_limited(patched):
+    client = patched["install"]([_FakeResponse(429) for _ in range(4)])
+
+    result = SAMGovProvider(max_retries=3).lookup_entity(_UEI)
+
+    assert result.match_status == "rate_limited"
+    assert result.uei == _UEI
+    assert client.calls == 4  # initial + 3 retries
+
+
+# ── 4d: 429 backoff is longer than the 5xx backoff ───────────────────────────────
+
+def test_429_backoff_longer_than_5xx(monkeypatch):
+    monkeypatch.setenv("SAM_GOV_API_KEY", "test-key")
+    sleeps: list[float] = []
+    monkeypatch.setattr(sam_gov.time, "sleep", lambda s: sleeps.append(s))
+
+    def install(items):
+        client = _FakeClient(items)
+        monkeypatch.setattr(sam_gov.httpx, "Client", lambda **_kw: client)
+        return client
+
+    # backoff_base=1 → 5xx delay in [1, 2); rate_429_backoff_base=5 → 429 in [5, 6).
+    # High rate limit keeps the per-minute throttle out of the comparison.
+    p = SAMGovProvider(
+        max_retries=1,
+        backoff_base=1.0,
+        rate_429_backoff_base=5.0,
+        rate_limit_per_minute=100000,
+    )
+
+    install([_FakeResponse(503), _FakeResponse(200, _MATCHED_PAYLOAD)])
+    p.lookup_entity(_UEI)
+    five_xx_sleep = max(sleeps)
+    sleeps.clear()
+
+    install([_FakeResponse(429), _FakeResponse(200, _MATCHED_PAYLOAD)])
+    p.lookup_entity(_UEI)
+    rate_sleep = max(sleeps)
+
+    assert rate_sleep > five_xx_sleep
+
+
+# ── 4e: Retry-After parser ───────────────────────────────────────────────────────
+
+def test_parse_retry_after():
+    assert sam_gov._parse_retry_after("5") == 5.0
+    assert sam_gov._parse_retry_after("  12 ") == 12.0
+    assert sam_gov._parse_retry_after(None) is None
+    assert sam_gov._parse_retry_after("") is None
+    assert sam_gov._parse_retry_after("-3") is None
+    assert sam_gov._parse_retry_after("Wed, 21 Oct 2015 07:28:00 GMT") is None
+
+
+# ── 4f: per-minute throttle paces consecutive lookups ────────────────────────────
+
+def test_throttle_paces_consecutive_calls(monkeypatch):
+    monkeypatch.setenv("SAM_GOV_API_KEY", "test-key")
+    sleeps: list[float] = []
+    monkeypatch.setattr(sam_gov.time, "sleep", lambda s: sleeps.append(s))
+    # Freeze monotonic so elapsed-time between calls is zero → throttle must wait.
+    monkeypatch.setattr(sam_gov.time, "monotonic", lambda: 1000.0)
+
+    p = SAMGovProvider(rate_limit_per_minute=60)  # 1.0s minimum interval
+
+    client1 = _FakeClient([_FakeResponse(200, _MATCHED_PAYLOAD)])
+    monkeypatch.setattr(sam_gov.httpx, "Client", lambda **_kw: client1)
+    p.lookup_entity(_UEI)  # first call: nothing to wait for
+
+    client2 = _FakeClient([_FakeResponse(200, _MATCHED_PAYLOAD)])
+    monkeypatch.setattr(sam_gov.httpx, "Client", lambda **_kw: client2)
+    p.lookup_entity(_UEI)  # second call: must be paced ~1s after the first
+
+    assert any(abs(s - 1.0) < 0.001 for s in sleeps)
 
 
 # ── 5: 5xx exhausts retries then errors ─────────────────────────────────────────

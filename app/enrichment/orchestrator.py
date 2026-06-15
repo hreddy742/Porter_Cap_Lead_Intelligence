@@ -27,6 +27,13 @@ from app.ops.sentry import capture_exception
 
 logger = structlog.get_logger(__name__)
 
+# A SAM lookup that returns one of these told us something real about the
+# company (it matched, definitively did not match, or had no UEI to look up).
+_SAM_USEFUL = frozenset({"matched", "not_found", "no_uei"})
+# These mean the provider failed (throttle / API error). They are NOT evidence
+# that the company is uncontactable and must never be stored as such.
+_SAM_PROVIDER_FAILURE = frozenset({"rate_limited", "error"})
+
 
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
@@ -109,8 +116,18 @@ def _enrich_one(
     search_provider,
     sam_provider,
     db: Session,
-) -> None:
-    """Enrich one company and upsert the company_contactability row."""
+) -> str:
+    """Enrich one company and upsert the company_contactability row.
+
+    Returns an outcome string:
+      "enriched"      — a useful result was stored.
+      "rate_limited"  — SAM was throttled and nothing else was learned; no write.
+      "error"         — SAM lookup failed and nothing else was learned; no write.
+
+    Provider failures (throttle / API error) with no other useful signal do NOT
+    write a row: a throttle is not proof the company is uncontactable, and we
+    must not overwrite an existing good row with a misleading one (option A).
+    """
     company_id = row.company_id
     company_name = row.canonical_name
     state = row.state
@@ -138,6 +155,22 @@ def _enrich_one(
         contact_result = extract_website_contacts(website_result.url, dry_run=False)
 
     official_website = website_result.url if website_result else None
+
+    # Honest failure handling: if SAM was the source of truth for this run and it
+    # failed (throttle / API error) AND we learned nothing else, do not write a
+    # row. Storing not_contactable here would be a lie, and overwriting an
+    # existing good row would destroy real data.
+    sam_failed = sam_result is not None and sam_result.match_status in _SAM_PROVIDER_FAILURE
+    learned_something = bool(official_website) or (
+        sam_result is not None and sam_result.match_status in _SAM_USEFUL
+    )
+    if sam_failed and not learned_something:
+        log.warning(
+            "contactability_provider_failed",
+            sam_match_status=sam_result.match_status,
+        )
+        return sam_result.match_status  # "rate_limited" or "error"
+
     status = compute_contactability_status(
         official_website=official_website,
         contact_page_url=contact_result.contact_page_url,
@@ -220,6 +253,7 @@ def _enrich_one(
 
     db.flush()
     log.info("contactability_enriched", status=status, score=score)
+    return "enriched"
 
 
 def run_contactability_enrichment(
@@ -282,13 +316,13 @@ def run_contactability_enrichment(
 
     enriched = 0
     failed = 0
+    failure_reasons: dict[str, int] = {}
 
     for row in companies:
         try:
-            _enrich_one(row, run.id, source, search_provider, sam_provider, db)
-            enriched += 1
+            outcome = _enrich_one(row, run.id, source, search_provider, sam_provider, db)
         except Exception as exc:
-            failed += 1
+            outcome = "exception"
             logger.error(
                 "contactability_enrich_failed",
                 company_id=str(row.company_id),
@@ -296,10 +330,20 @@ def run_contactability_enrichment(
             )
             capture_exception(exc, {"company_id": str(row.company_id)})
 
+        if outcome == "enriched":
+            enriched += 1
+        else:
+            failed += 1
+            failure_reasons[outcome] = failure_reasons.get(outcome, 0) + 1
+
     run.finished_at = _utcnow()
     run.status = "completed"
     run.companies_enriched = enriched
     run.companies_failed = failed
+    if failure_reasons:
+        run.error_summary = "; ".join(
+            f"{reason}={count}" for reason, count in sorted(failure_reasons.items())
+        )
     db.commit()
 
     logger.info(
@@ -307,6 +351,7 @@ def run_contactability_enrichment(
         run_id=str(run.id),
         enriched=enriched,
         failed=failed,
+        failure_reasons=failure_reasons,
     )
 
     return {
@@ -315,6 +360,7 @@ def run_contactability_enrichment(
         "companies_attempted": len(companies),
         "companies_enriched": enriched,
         "companies_failed": failed,
+        "companies_failed_breakdown": failure_reasons,
         "tier": tier,
         "source": source,
     }

@@ -241,3 +241,115 @@ def test_apply_source_sam_updates_sam_fields():
     assert cc.contactability_status == "needs_paid_enrichment"  # SAM match, no website
     assert "sam_source=" in (cc.contactability_notes or "")
     assert result["companies_enriched"] == 1
+
+
+# ── Test 11: SAM 429/rate_limited is a provider failure, not "not_contactable" ─
+
+def _apply_sam_only(db, sam_result):
+    """Run an apply-mode source='sam' enrichment with a stubbed SAM result."""
+    mock_sam = MagicMock()
+    mock_sam.lookup_entity.return_value = sam_result
+    return run_contactability_enrichment(
+        db=db,
+        limit=1,
+        tier="warm",
+        source="sam",
+        dry_run=False,
+        apply=True,
+        search_provider=MagicMock(),
+        sam_provider=mock_sam,
+    )
+
+
+def _cc_rows_added(db):
+    return [
+        c.args[0]
+        for c in db.add.call_args_list
+        if isinstance(c.args[0], CompanyContactability)
+    ]
+
+
+def test_sam_rate_limited_counts_failed_and_writes_no_row():
+    rows = [_make_company_row(uei="ABC123DEF456")]
+    db = MagicMock()
+    db.execute.return_value.fetchall.return_value = rows
+    db.execute.return_value.scalar_one_or_none.return_value = None
+
+    result = _apply_sam_only(
+        db, SAMResult(uei="ABC123DEF456", match_status="rate_limited")
+    )
+
+    assert result["companies_attempted"] == 1
+    assert result["companies_enriched"] == 0
+    assert result["companies_failed"] == 1
+    assert result["companies_failed_breakdown"] == {"rate_limited": 1}
+    # A throttle is NOT proof of non-contactability: no row written/overwritten.
+    assert _cc_rows_added(db) == []
+
+
+def test_sam_error_counts_failed_and_writes_no_row():
+    rows = [_make_company_row(uei="ABC123DEF456")]
+    db = MagicMock()
+    db.execute.return_value.fetchall.return_value = rows
+    db.execute.return_value.scalar_one_or_none.return_value = None
+
+    result = _apply_sam_only(db, SAMResult(uei="ABC123DEF456", match_status="error"))
+
+    assert result["companies_enriched"] == 0
+    assert result["companies_failed"] == 1
+    assert result["companies_failed_breakdown"] == {"error": 1}
+    assert _cc_rows_added(db) == []
+
+
+def test_sam_not_found_is_a_useful_result_and_enriches():
+    # not_found means the API answered "no such entity" — a real, storable fact.
+    rows = [_make_company_row(uei="ABC123DEF456")]
+    db = MagicMock()
+    db.execute.return_value.fetchall.return_value = rows
+    db.execute.return_value.scalar_one_or_none.return_value = None
+
+    result = _apply_sam_only(db, SAMResult(uei="ABC123DEF456", match_status="not_found"))
+
+    assert result["companies_enriched"] == 1
+    assert result["companies_failed"] == 0
+    cc_rows = _cc_rows_added(db)
+    assert len(cc_rows) == 1
+    assert cc_rows[0].sam_match_status == "not_found"
+    # No website, no SAM match → not_contactable is honest here (API really answered).
+    assert cc_rows[0].contactability_status == "not_contactable"
+
+
+def test_run_summary_failed_breakdown_mixed():
+    rows = [
+        _make_company_row(uei="A"),
+        _make_company_row(uei="B"),
+        _make_company_row(uei="C"),
+    ]
+    db = MagicMock()
+    db.execute.return_value.fetchall.return_value = rows
+    db.execute.return_value.scalar_one_or_none.return_value = None
+
+    mock_sam = MagicMock()
+    mock_sam.lookup_entity.side_effect = [
+        SAMResult(uei="A", match_status="matched", registration_status="Active"),
+        SAMResult(uei="B", match_status="rate_limited"),
+        SAMResult(uei="C", match_status="error"),
+    ]
+
+    result = run_contactability_enrichment(
+        db=db,
+        limit=3,
+        tier="warm",
+        source="sam",
+        dry_run=False,
+        apply=True,
+        search_provider=MagicMock(),
+        sam_provider=mock_sam,
+    )
+
+    assert result["companies_attempted"] == 3
+    assert result["companies_enriched"] == 1  # only the matched one
+    assert result["companies_failed"] == 2
+    assert result["companies_failed_breakdown"] == {"rate_limited": 1, "error": 1}
+    # Exactly one contactability row written (the matched company).
+    assert len(_cc_rows_added(db)) == 1

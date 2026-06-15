@@ -36,7 +36,9 @@ class SAMResult(BaseModel):
     model_config = ConfigDict(frozen=True)
 
     uei: str | None
-    match_status: str          # 'matched' | 'not_found' | 'no_uei' | 'error' | 'not_implemented'
+    # 'matched' | 'not_found' | 'no_uei' → useful results worth storing.
+    # 'rate_limited' | 'error' → provider failure; NOT evidence about the company.
+    match_status: str
     registration_status: str | None = None
     address: str | None = None
 
