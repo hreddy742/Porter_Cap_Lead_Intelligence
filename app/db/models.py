@@ -496,6 +496,98 @@ class DuplicateReview(Base):
     )
 
 
+# ─── Table 15: contactability_runs ────────────────────────────────────────────
+
+class ContactabilityRun(Base):
+    __tablename__ = "contactability_runs"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    started_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    finished_at = Column(DateTime(timezone=True))
+    status = Column(String(20), nullable=False, default="running")
+    trigger = Column(String(20), nullable=False, default="cli")
+    source_filter = Column(String(20))
+    tier_filter = Column(String(10))
+    company_limit = Column(Integer, nullable=False)
+    dry_run = Column(Boolean, nullable=False, default=True)
+    companies_attempted = Column(Integer, default=0)
+    companies_enriched = Column(Integer, default=0)
+    companies_failed = Column(Integer, default=0)
+    error_summary = Column(Text)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+
+    __table_args__ = (
+        Index("idx_contactability_runs_status", "status"),
+        Index("idx_contactability_runs_started_at", "started_at"),
+    )
+
+    contactability_records = relationship("CompanyContactability", back_populates="enrichment_run")
+
+
+# ─── Table 16: company_contactability ─────────────────────────────────────────
+
+class CompanyContactability(Base):
+    __tablename__ = "company_contactability"
+
+    id = Column(UUID(as_uuid=True), primary_key=True, default=uuid.uuid4)
+    company_id = Column(UUID(as_uuid=True), ForeignKey("companies.id"), nullable=False)
+    lead_candidate_id = Column(UUID(as_uuid=True), ForeignKey("lead_candidates.id"))
+
+    # Website discovery
+    official_website = Column(Text)
+    website_confidence = Column(Numeric(3, 2))
+    website_source = Column(String(30))
+    website_source_url = Column(Text)
+
+    # Contact extraction from website
+    contact_page_url = Column(Text)
+    phone = Column(String(30))
+    phone_source_url = Column(Text)
+    generic_email = Column(String(255))
+    email_source_url = Column(Text)
+    address_from_website = Column(Text)
+
+    # SAM.gov entity data
+    sam_uei = Column(String(12))
+    sam_match_status = Column(String(20))
+    sam_registration_status = Column(String(30))
+    sam_address = Column(Text)
+
+    # Status rollup
+    contactability_status = Column(String(30), nullable=False)
+    contactability_score = Column(Integer, default=0)
+    contactability_notes = Column(Text)
+
+    # Audit
+    enrichment_run_id = Column(UUID(as_uuid=True), ForeignKey("contactability_runs.id"))
+    last_checked_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
+    updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "contactability_status IN ('contactable', 'partially_contactable', 'not_contactable', 'needs_paid_enrichment')",
+            name="chk_contactability_status_valid",
+        ),
+        CheckConstraint(
+            "website_confidence IS NULL OR (website_confidence >= 0 AND website_confidence <= 1)",
+            name="chk_website_confidence_range",
+        ),
+        CheckConstraint(
+            "contactability_score IS NULL OR (contactability_score >= 0 AND contactability_score <= 10)",
+            name="chk_contactability_score_range",
+        ),
+        UniqueConstraint("company_id", name="uq_company_contactability_company"),
+        Index("idx_company_contactability_company_id", "company_id"),
+        Index("idx_company_contactability_status", "contactability_status"),
+        Index("idx_company_contactability_last_checked", "last_checked_at"),
+        Index("idx_company_contactability_sam_uei", "sam_uei"),
+    )
+
+    company = relationship("Company")
+    enrichment_run = relationship("ContactabilityRun", back_populates="contactability_records")
+
+
 # ─── Append-only enforcement (SHIP-BLOCKER FIX) ───────────────────────────────
 #
 # The review plan's "RULE DO NOTHING" approach has three problems:
