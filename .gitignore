@@ -48,3 +48,6 @@ exports/*.csv
 
 # Backups — keep directory tracked, ignore generated SQL dumps
 backups/*.sql
+
+# Generated manual review packs
+outputs/manual_review/
