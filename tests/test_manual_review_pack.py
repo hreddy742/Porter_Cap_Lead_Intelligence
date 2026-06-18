@@ -74,6 +74,13 @@ def _make_lead_row(**kwargs) -> SimpleNamespace:
         "recent_total_90d": Decimal("75000"),
         "lifetime_total": Decimal("125000"),
         "most_recent_date": "2024-01-15",
+        "contactability_status": None,
+        "contactability_score": None,
+        "sam_match_status": None,
+        "sam_registration_status": None,
+        "sam_uei": None,
+        "contactability_last_checked_at": None,
+        "contactability_notes": None,
     }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
@@ -401,3 +408,89 @@ def test_build_review_rows_does_not_write_to_db():
     db.add.assert_not_called()
     db.commit.assert_not_called()
     db.delete.assert_not_called()
+
+
+# ── Contactability / SAM entity validation fields ────────────────────────────
+
+def test_leads_query_joins_contactability():
+    """The leads query must LEFT JOIN company_contactability and select its fields."""
+    sql = _leads_query_sql(None)
+
+    assert "LEFT JOIN company_contactability cc" in sql
+    assert "cc.contactability_status" in sql
+    assert "cc.contactability_score" in sql
+    assert "cc.sam_match_status" in sql
+    assert "cc.sam_registration_status" in sql
+    assert "cc.sam_uei" in sql
+    assert "contactability_last_checked_at" in sql
+    assert "cc.contactability_notes" in sql
+
+
+def test_contactability_fields_present_when_enriched():
+    lead_row = _make_lead_row(
+        contactability_status="needs_paid_enrichment",
+        contactability_score=4,
+        sam_match_status="matched",
+        sam_registration_status="Active",
+        sam_uei="ABC123DEF456",
+        contactability_last_checked_at="2026-06-15 20:24:21",
+        contactability_notes="sam_source=https://api.sam.gov",
+    )
+    ev_row = _make_evidence_row()
+
+    db = MagicMock()
+    db.execute.side_effect = [
+        _mk_fetchall([lead_row]),
+        _mk_fetchone(ev_row),
+    ]
+
+    rows = build_review_rows(db, limit=1)
+
+    r = rows[0]
+    assert r["contactability_status"] == "needs_paid_enrichment"
+    assert r["contactability_score"] == "4"
+    assert r["sam_match_status"] == "matched"
+    assert r["sam_registration_status"] == "Active"
+    assert r["sam_uei"] == "ABC123DEF456"
+    assert r["contactability_last_checked_at"] == "2026-06-15 20:24:21"
+    assert r["contactability_notes"] == "sam_source=https://api.sam.gov"
+
+
+def test_contactability_fields_not_available_when_missing():
+    # _make_lead_row defaults all contactability fields to None (no enrichment row)
+    lead_row = _make_lead_row()
+    ev_row = _make_evidence_row()
+
+    db = MagicMock()
+    db.execute.side_effect = [
+        _mk_fetchall([lead_row]),
+        _mk_fetchone(ev_row),
+    ]
+
+    rows = build_review_rows(db, limit=1)
+
+    r = rows[0]
+    assert r["contactability_status"] == NOT_AVAILABLE
+    assert r["contactability_score"] == NOT_AVAILABLE
+    assert r["sam_match_status"] == NOT_AVAILABLE
+    assert r["sam_uei"] == NOT_AVAILABLE
+    assert r["contactability_notes"] == NOT_AVAILABLE
+
+
+def test_markdown_includes_sam_entity_validation_section(tmp_path):
+    rows = [_make_review_row(
+        contactability_status="needs_paid_enrichment",
+        sam_match_status="matched",
+        sam_uei="ABC123DEF456",
+    )]
+    md_path = str(tmp_path / "pack.md")
+    write_markdown(rows, _make_meta(), md_path)
+
+    with open(md_path, encoding="utf-8") as fh:
+        content = fh.read()
+
+    assert "SAM Entity Validation" in content
+    assert "SAM UEI: ABC123DEF456" in content
+    # The section must not imply a confirmed contact (positive sales claims are
+    # already guarded document-wide by test_markdown_does_not_make_positive_sales_claims)
+    assert "verified contact" not in content.lower()

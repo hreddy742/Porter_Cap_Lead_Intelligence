@@ -37,6 +37,13 @@ CSV_FIELDNAMES = [
     "best_evidence_claim",
     "best_evidence_confidence",
     "source_url",
+    "contactability_status",
+    "contactability_score",
+    "sam_match_status",
+    "sam_registration_status",
+    "sam_uei",
+    "contactability_last_checked_at",
+    "contactability_notes",
     "why_this_lead_is_included",
     "reviewer_notes",
 ]
@@ -152,19 +159,31 @@ def _leads_query_sql(tier: str | None) -> str:
               AND s.signal_date >= CURRENT_DATE - INTERVAL '90 days'
           )                                                                  AS recent_total_90d,
           SUM(s.award_amount) FILTER (WHERE s.award_amount > 0)            AS lifetime_total,
-          MAX(s.signal_date) FILTER (WHERE s.award_amount > 0)             AS most_recent_date
+          MAX(s.signal_date) FILTER (WHERE s.award_amount > 0)             AS most_recent_date,
+          cc.contactability_status,
+          cc.contactability_score,
+          cc.sam_match_status,
+          cc.sam_registration_status,
+          cc.sam_uei,
+          cc.last_checked_at                                               AS contactability_last_checked_at,
+          cc.contactability_notes
         FROM lead_candidates lc
         JOIN companies c ON c.id = lc.company_id
         LEFT JOIN signals s
           ON s.company_id = lc.company_id
          AND s.signal_type = 'CONTRACT_AWARD'
+        LEFT JOIN company_contactability cc
+          ON cc.company_id = lc.company_id
         WHERE lc.status = 'active'
           AND lc.deleted_at IS NULL
           AND c.deleted_at IS NULL
           {tier_clause}
         GROUP BY
           lc.id, lc.company_id, lc.tier, lc.current_score, lc.sales_status,
-          c.canonical_name, c.city, c.state, c.naics_code, c.naics_description
+          c.canonical_name, c.city, c.state, c.naics_code, c.naics_description,
+          cc.contactability_status, cc.contactability_score, cc.sam_match_status,
+          cc.sam_registration_status, cc.sam_uei, cc.last_checked_at,
+          cc.contactability_notes
         ORDER BY
           CASE lc.tier WHEN 'hot' THEN 1 WHEN 'warm' THEN 2 WHEN 'cold' THEN 3 ELSE 4 END ASC,
           lc.current_score DESC NULLS LAST,
@@ -274,6 +293,13 @@ def build_review_rows(
             "best_evidence_claim": ev["claim"],
             "best_evidence_confidence": ev["confidence"],
             "source_url": ev["source_url"],
+            "contactability_status": _na(row.contactability_status),
+            "contactability_score": _na(row.contactability_score),
+            "sam_match_status": _na(row.sam_match_status),
+            "sam_registration_status": _na(row.sam_registration_status),
+            "sam_uei": _na(row.sam_uei),
+            "contactability_last_checked_at": _na(row.contactability_last_checked_at),
+            "contactability_notes": _na(row.contactability_notes),
             "why_this_lead_is_included": why,
             "reviewer_notes": "",
         })
@@ -375,6 +401,15 @@ def write_markdown(rows: list[dict], meta: dict, output_path: str) -> None:
             lines.append(f"- Positive award count: {row.get('positive_award_count', NOT_AVAILABLE)}")
             lines.append(f"- Most recent award: {row.get('most_recent_award_date', NOT_AVAILABLE)}")
             lines.append(f"- Gate 10 pass type: {row.get('gate10_pass_type', NOT_AVAILABLE)}")
+            lines.append("")
+            lines.append("**SAM Entity Validation** (entity match only — does not confirm a decision-maker email or phone):")
+            lines.append(f"- Contactability status: {row.get('contactability_status', NOT_AVAILABLE)}")
+            lines.append(f"- Contactability score: {row.get('contactability_score', NOT_AVAILABLE)}")
+            lines.append(f"- SAM match status: {row.get('sam_match_status', NOT_AVAILABLE)}")
+            lines.append(f"- SAM registration status: {row.get('sam_registration_status', NOT_AVAILABLE)}")
+            lines.append(f"- SAM UEI: {row.get('sam_uei', NOT_AVAILABLE)}")
+            lines.append(f"- Last checked: {row.get('contactability_last_checked_at', NOT_AVAILABLE)}")
+            lines.append(f"- Notes: {row.get('contactability_notes', NOT_AVAILABLE)}")
             lines.append("")
             lines.append(
                 f"**Why included:** {row.get('why_this_lead_is_included', NOT_AVAILABLE)}"

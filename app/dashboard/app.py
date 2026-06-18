@@ -28,6 +28,7 @@ from app.dashboard.review import (
     format_date,
     get_award_aggregation,
     get_award_gate_summary,
+    get_contactability,
     get_lead_detail,
     get_reviewer_id,
     list_reviewable_leads,
@@ -244,6 +245,49 @@ elif page == "Lead Detail":
                                     f"{row['count']} award(s), "
                                     f"{format_currency(row['total'])}"
                                 )
+
+                with SessionLocal() as cc_db:
+                    contact = get_contactability(company.id, cc_db)
+
+                    with st.expander("Contactability / SAM Entity Validation", expanded=True):
+                        st.caption(
+                            "SAM entity validation only — confirms the entity exists in "
+                            "SAM.gov. It does not confirm a decision-maker email or phone."
+                        )
+                        if contact is None:
+                            st.info(
+                                "Not yet enriched — no contactability record for this company."
+                            )
+                        else:
+                            status = contact.contactability_status
+                            status_label = (
+                                "Needs paid enrichment"
+                                if status == "needs_paid_enrichment"
+                                else (status or "Not available").replace("_", " ").capitalize()
+                            )
+                            sam_label = (
+                                "Entity matched in SAM"
+                                if contact.sam_match_status == "matched"
+                                else (contact.sam_match_status or "Not available")
+                            )
+                            score = contact.contactability_score
+                            cc1, cc2 = st.columns(2)
+                            cc1.write(f"**Contactability status:** {status_label}")
+                            cc1.write(
+                                f"**Contactability score:** "
+                                f"{score if score is not None else 'Not available'}"
+                            )
+                            cc1.write(f"**SAM match:** {sam_label}")
+                            cc2.write(
+                                f"**SAM registration status:** "
+                                f"{contact.sam_registration_status or 'Not available'}"
+                            )
+                            cc2.write(f"**SAM UEI:** {contact.sam_uei or 'Not available'}")
+                            cc2.write(
+                                f"**Last checked:** {format_date(contact.last_checked_at)}"
+                            )
+                            if contact.contactability_notes:
+                                st.write(f"**Notes:** {contact.contactability_notes}")
 
             with st.expander(
                 f"Review History ({len(detail['review_history'])} decisions)"

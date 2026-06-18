@@ -33,6 +33,7 @@ from app.dashboard.review import (
     format_date,
     get_award_aggregation,
     get_award_gate_summary,
+    get_contactability,
     get_lead_detail,
     get_latest_review_action,
     get_reviewer_id,
@@ -40,6 +41,7 @@ from app.dashboard.review import (
 )
 from app.db.models import (
     Company,
+    CompanyContactability,
     EvidenceItem,
     LeadCandidate,
     LeadScore,
@@ -774,3 +776,34 @@ def test_format_date_none_returns_not_available():
 def test_format_date_date_object_returns_readable_string():
     result = format_date(date(2024, 3, 15))
     assert result == "2024-03-15"
+
+
+# ─── Tests 34-35: get_contactability ──────────────────────────────────────────
+
+
+def test_get_contactability_returns_row_when_present():
+    db = MagicMock()
+    company_id = uuid.uuid4()
+
+    mock_contact = MagicMock(spec=CompanyContactability)
+    mock_contact.contactability_status = "needs_paid_enrichment"
+    mock_contact.sam_match_status = "matched"
+
+    db.execute.return_value.scalar_one_or_none.return_value = mock_contact
+
+    result = get_contactability(company_id, db)
+
+    assert result is mock_contact
+    assert result.contactability_status == "needs_paid_enrichment"
+    assert result.sam_match_status == "matched"
+    db.execute.assert_called_once()
+
+
+def test_get_contactability_returns_none_when_missing():
+    db = MagicMock()
+    db.execute.return_value.scalar_one_or_none.return_value = None
+
+    result = get_contactability(uuid.uuid4(), db)
+
+    assert result is None
+    db.execute.assert_called_once()

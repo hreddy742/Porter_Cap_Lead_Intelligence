@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.db.models import (
     Company,
+    CompanyContactability,
     EvidenceItem,
     LeadCandidate,
     LeadScore,
@@ -162,6 +163,19 @@ def get_lead_detail(lead_candidate_id: UUID, db: Session) -> dict | None:
         "signals": signals,
         "review_history": decisions,
     }
+
+
+def get_contactability(company_id: UUID, db: Session) -> CompanyContactability | None:
+    """Return the company_contactability row for a company, or None if not enriched.
+
+    Read-only display context. This reflects SAM entity validation only — it is
+    NOT a verified contact (no confirmed decision-maker email or phone).
+    """
+    return db.execute(
+        select(CompanyContactability).where(
+            CompanyContactability.company_id == company_id
+        )
+    ).scalar_one_or_none()
 
 
 def get_latest_review_action(
