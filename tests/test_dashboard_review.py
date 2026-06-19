@@ -28,15 +28,19 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from app.dashboard.review import (
+    _get_primary_source_by_company,
     create_review_decision,
     format_currency,
     format_date,
     get_award_aggregation,
     get_award_gate_summary,
     get_contactability,
+    get_latest_run_context,
     get_lead_detail,
     get_latest_review_action,
     get_reviewer_id,
+    get_source_list,
+    list_leads_filtered,
     list_reviewable_leads,
 )
 from app.db.models import (
@@ -807,3 +811,305 @@ def test_get_contactability_returns_none_when_missing():
 
     assert result is None
     db.execute.assert_called_once()
+
+
+# ─── Tests 36-37: get_latest_run_context ──────────────────────────────────────
+
+
+def test_get_latest_run_context_no_runs():
+    """When no pipeline runs exist, has_runs=False and leads_scored=None."""
+    db = MagicMock()
+    no_run_health = {
+        "has_runs": False,
+        "pipeline_run_id": None,
+        "status": None,
+        "started_at": None,
+        "finished_at": None,
+        "duration_seconds": None,
+        "sources_total": 0,
+        "sources_succeeded": 0,
+        "sources_failed": 0,
+        "records_fetched": None,
+        "raw_events_stored": None,
+        "evidence_items_created": None,
+        "companies_resolved": None,
+        "signals_created": None,
+        "companies_scored": None,
+        "errors": [],
+    }
+    with patch("app.dashboard.review.get_latest_pipeline_health", return_value=no_run_health):
+        result = get_latest_run_context(db)
+
+    assert result["has_runs"] is False
+    assert result["leads_scored"] is None
+    # No DB query needed when has_runs=False
+    db.query.assert_not_called()
+
+
+def test_get_latest_run_context_with_run():
+    """When a run exists, leads_scored = sum of hot+warm+cold+archive."""
+    db = MagicMock()
+    mock_run = MagicMock()
+    mock_run.total_hot = 3
+    mock_run.total_warm = 5
+    mock_run.total_cold = 2
+    mock_run.total_archive = 1
+    db.query.return_value.order_by.return_value.first.return_value = mock_run
+
+    run_health = {
+        "has_runs": True,
+        "pipeline_run_id": uuid.uuid4(),
+        "status": "completed",
+        "started_at": datetime(2026, 6, 19, 10, 0, 0),
+        "finished_at": datetime(2026, 6, 19, 10, 5, 0),
+        "duration_seconds": 300.0,
+        "sources_total": 1,
+        "sources_succeeded": 1,
+        "sources_failed": 0,
+        "records_fetched": 500,
+        "raw_events_stored": 480,
+        "evidence_items_created": None,
+        "companies_resolved": None,
+        "signals_created": None,
+        "companies_scored": None,
+        "errors": [],
+    }
+    with patch("app.dashboard.review.get_latest_pipeline_health", return_value=run_health):
+        result = get_latest_run_context(db)
+
+    assert result["has_runs"] is True
+    assert result["leads_scored"] == 11  # 3+5+2+1
+
+
+# ─── Tests 38-39: get_source_list ─────────────────────────────────────────────
+
+
+def test_get_source_list_returns_id_name_dicts():
+    db = MagicMock()
+    from app.db.models import SourceRegistry as SR
+
+    mock_src = MagicMock(spec=SR)
+    mock_src.id = uuid.uuid4()
+    mock_src.name = "usaspending"
+    db.execute.return_value.scalars.return_value.all.return_value = [mock_src]
+
+    result = get_source_list(db)
+
+    assert len(result) == 1
+    assert result[0]["name"] == "usaspending"
+    assert result[0]["id"] == mock_src.id
+
+
+def test_get_source_list_empty():
+    db = MagicMock()
+    db.execute.return_value.scalars.return_value.all.return_value = []
+    assert get_source_list(db) == []
+
+
+# ─── Tests 40-53: list_leads_filtered ────────────────────────────────────────
+
+# Helper: build mock lead + three execute side_effects (main, signals, sources)
+def _mock_filtered_db(leads: list) -> MagicMock:
+    db = MagicMock()
+    main_result = MagicMock()
+    main_result.scalars.return_value.all.return_value = leads
+    sig_result = MagicMock()
+    sig_result.all.return_value = []
+    src_result = MagicMock()
+    src_result.all.return_value = []
+    db.execute.side_effect = [main_result, sig_result, src_result]
+    return db
+
+
+def test_list_leads_filtered_view_all_returns_active():
+    """view='all' returns all active leads with no view-specific filter."""
+    mock_lead = MagicMock(spec=LeadCandidate)
+    mock_lead.status = "active"
+    mock_lead.company_id = uuid.uuid4()
+    mock_lead.created_at = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    mock_lead.updated_at = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    mock_lead.company = MagicMock(spec=Company)
+
+    db = _mock_filtered_db([mock_lead])
+    result = list_leads_filtered(db, view="all")
+
+    assert len(result) == 1
+    assert result[0]["lead"] is mock_lead
+    assert result[0]["is_new_in_run"] is False  # no latest_run_started_at
+
+
+def test_list_leads_filtered_no_leads_returns_empty():
+    db = _mock_filtered_db([])
+    result = list_leads_filtered(db)
+    assert result == []
+    # Only one DB call (main query); no follow-up queries needed
+    assert db.execute.call_count == 1
+
+
+def test_list_leads_filtered_view_today_adds_created_at_filter():
+    db = _mock_filtered_db([])
+    list_leads_filtered(db, view="today")
+    stmt_str = str(db.execute.call_args[0][0])
+    assert "created_at >=" in stmt_str
+
+
+def test_list_leads_filtered_view_recently_updated_adds_updated_at_filter():
+    db = _mock_filtered_db([])
+    list_leads_filtered(db, view="recently_updated")
+    stmt_str = str(db.execute.call_args[0][0])
+    assert "updated_at >=" in stmt_str
+
+
+def test_list_leads_filtered_view_latest_run_with_started_at():
+    """view='latest_run' with a start time adds updated_at >= start filter."""
+    db = _mock_filtered_db([])
+    started = datetime(2026, 6, 19, 8, 0, 0, tzinfo=timezone.utc)
+    list_leads_filtered(db, view="latest_run", latest_run_started_at=started)
+    stmt_str = str(db.execute.call_args[0][0])
+    assert "updated_at >=" in stmt_str
+
+
+def test_list_leads_filtered_view_latest_run_no_started_at_behaves_like_all():
+    """view='latest_run' without start time does not add an updated_at WHERE predicate."""
+    db_with = _mock_filtered_db([])
+    db_without = _mock_filtered_db([])
+    started = datetime(2026, 6, 19, 8, 0, 0, tzinfo=timezone.utc)
+    list_leads_filtered(db_with, view="latest_run", latest_run_started_at=started)
+    list_leads_filtered(db_without, view="latest_run", latest_run_started_at=None)
+    stmt_with = str(db_with.execute.call_args[0][0])
+    stmt_without = str(db_without.execute.call_args[0][0])
+    # The >= predicate only appears when latest_run_started_at is provided
+    assert "updated_at >=" in stmt_with
+    assert "updated_at >=" not in stmt_without
+
+
+def test_list_leads_filtered_view_custom_date_range():
+    db = _mock_filtered_db([])
+    list_leads_filtered(
+        db,
+        view="custom",
+        date_from=date(2026, 6, 1),
+        date_to=date(2026, 6, 19),
+    )
+    stmt_str = str(db.execute.call_args[0][0]).lower()
+    assert "created_at" in stmt_str
+
+
+def test_list_leads_filtered_tier_filter():
+    db = _mock_filtered_db([])
+    list_leads_filtered(db, tier="hot")
+    stmt_str = str(db.execute.call_args[0][0]).lower()
+    assert "tier" in stmt_str
+
+
+def test_list_leads_filtered_sales_status_filter():
+    db = _mock_filtered_db([])
+    list_leads_filtered(db, sales_status="approved")
+    stmt_str = str(db.execute.call_args[0][0]).lower()
+    assert "sales_status" in stmt_str
+
+
+def test_list_leads_filtered_source_id_filter():
+    db = _mock_filtered_db([])
+    src_id = uuid.uuid4()
+    list_leads_filtered(db, source_id=src_id)
+    stmt_str = str(db.execute.call_args[0][0])
+    assert "source_id" in stmt_str
+
+
+def test_list_leads_filtered_has_contactability_filter():
+    db = _mock_filtered_db([])
+    list_leads_filtered(db, has_contactability=True)
+    stmt_str = str(db.execute.call_args[0][0])
+    assert "company_contactability" in stmt_str
+
+
+def test_list_leads_filtered_sort_newest_first():
+    db = _mock_filtered_db([])
+    list_leads_filtered(db, sort_by="newest_first")
+    stmt_str = str(db.execute.call_args[0][0]).lower()
+    assert "created_at" in stmt_str
+    assert "desc" in stmt_str
+
+
+def test_list_leads_filtered_sort_latest_updated():
+    db = _mock_filtered_db([])
+    list_leads_filtered(db, sort_by="latest_updated")
+    stmt_str = str(db.execute.call_args[0][0]).lower()
+    assert "updated_at" in stmt_str
+    assert "desc" in stmt_str
+
+
+def test_list_leads_filtered_is_new_in_run_flag():
+    """is_new_in_run is True when lead.created_at >= latest_run_started_at."""
+    started = datetime(2026, 6, 19, 8, 0, 0, tzinfo=timezone.utc)
+    cid = uuid.uuid4()
+
+    mock_lead_new = MagicMock(spec=LeadCandidate)
+    mock_lead_new.company_id = cid
+    mock_lead_new.created_at = datetime(2026, 6, 19, 9, 0, 0, tzinfo=timezone.utc)
+    mock_lead_new.updated_at = datetime(2026, 6, 19, 9, 0, 0, tzinfo=timezone.utc)
+    mock_lead_new.company = MagicMock(spec=Company)
+
+    db = _mock_filtered_db([mock_lead_new])
+    result = list_leads_filtered(db, latest_run_started_at=started)
+
+    assert result[0]["is_new_in_run"] is True
+
+
+def test_list_leads_filtered_enrichment_fields_populated():
+    """primary_source and latest_signal_date are populated from follow-up queries."""
+    cid = uuid.uuid4()
+    mock_lead = MagicMock(spec=LeadCandidate)
+    mock_lead.company_id = cid
+    mock_lead.created_at = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    mock_lead.updated_at = datetime(2026, 6, 1, tzinfo=timezone.utc)
+    mock_lead.company = MagicMock(spec=Company)
+
+    db = MagicMock()
+    main_result = MagicMock()
+    main_result.scalars.return_value.all.return_value = [mock_lead]
+
+    sig_row = MagicMock()
+    sig_row.company_id = cid
+    sig_row.latest_signal_date = date(2026, 5, 15)
+    sig_row.max_award = 250000
+    sig_result = MagicMock()
+    sig_result.all.return_value = [sig_row]
+
+    src_row = MagicMock()
+    src_row.company_id = cid
+    src_row.source_name = "usaspending"
+    src_result = MagicMock()
+    src_result.all.return_value = [src_row]
+
+    db.execute.side_effect = [main_result, sig_result, src_result]
+
+    result = list_leads_filtered(db)
+
+    assert result[0]["primary_source"] == "usaspending"
+    assert result[0]["latest_signal_date"] == date(2026, 5, 15)
+    assert result[0]["max_award_amount"] is not None
+
+
+# ─── Test 54: _get_primary_source_by_company ──────────────────────────────────
+
+
+def test_get_primary_source_by_company_empty_input():
+    db = MagicMock()
+    result = _get_primary_source_by_company([], db)
+    assert result == {}
+    db.execute.assert_not_called()
+
+
+def test_get_primary_source_by_company_maps_id_to_name():
+    cid = uuid.uuid4()
+    db = MagicMock()
+    row = MagicMock()
+    row.company_id = cid
+    row.source_name = "usaspending"
+    db.execute.return_value.all.return_value = [row]
+
+    result = _get_primary_source_by_company([cid], db)
+
+    assert result[cid] == "usaspending"

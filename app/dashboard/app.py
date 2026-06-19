@@ -29,9 +29,11 @@ from app.dashboard.review import (
     get_award_aggregation,
     get_award_gate_summary,
     get_contactability,
+    get_latest_run_context,
     get_lead_detail,
     get_reviewer_id,
-    list_reviewable_leads,
+    get_source_list,
+    list_leads_filtered,
 )
 from app.db.session import SessionLocal
 from app.ops.sentry import init_sentry
@@ -75,47 +77,189 @@ st.warning(
 
 # ── Lead List ──────────────────────────────────────────────────────────────────
 if page == "Lead List":
+
+    # ── Fetch run context and source list ─────────────────────────────────────
+    with SessionLocal() as ctx_db:
+        run_ctx = get_latest_run_context(ctx_db)
+        source_list = get_source_list(ctx_db)
+
+    # ── Pipeline Run Context header ───────────────────────────────────────────
+    with st.expander("Latest Pipeline Run", expanded=True):
+        if not run_ctx["has_runs"]:
+            st.info("No pipeline runs recorded yet.")
+        else:
+            st.caption(
+                "**Run date** = when Porter processed the record. "
+                "**Evidence date** = when the award/event happened. "
+                "**First seen** = when the lead first entered Porter's database. "
+                "**Last updated** = when the lead received new evidence or changed status."
+            )
+            hc1, hc2, hc3, hc4 = st.columns(4)
+            hc1.metric("Run ID (short)", str(run_ctx["pipeline_run_id"])[:8] + "…")
+            hc2.metric("Status", run_ctx["status"] or "—")
+            hc3.metric(
+                "Started",
+                format_date(run_ctx["started_at"]) if run_ctx["started_at"] else "—",
+            )
+            hc4.metric(
+                "Finished",
+                format_date(run_ctx["finished_at"]) if run_ctx["finished_at"] else "running",
+            )
+            hc5, hc6, hc7, hc8 = st.columns(4)
+            hc5.metric("Records Fetched", run_ctx["records_fetched"] or 0)
+            hc6.metric("Records Valid", run_ctx["raw_events_stored"] or 0)
+            hc7.metric(
+                "Leads Scored",
+                run_ctx["leads_scored"] if run_ctx["leads_scored"] is not None else "—",
+            )
+            hc8.metric("Sources Failed", len(run_ctx["errors"]))
+            if run_ctx["errors"]:
+                st.warning(
+                    "Source errors this run: "
+                    + "; ".join(e.get("error_text", "unknown") or "unknown" for e in run_ctx["errors"])
+                )
+            st.caption(
+                "Evidence items created / companies resolved / signals created are not "
+                "tracked in pipeline_runs — use orchestrator logs for those counts."
+            )
+
+    st.divider()
+
+    # ── Sidebar: View selector ────────────────────────────────────────────────
+    VIEW_LABELS = {
+        "All Active Leads": "all",
+        "Latest Run Results (approx.)": "latest_run",
+        "Today's New Leads": "today",
+        "Recently Updated (7 days)": "recently_updated",
+        "Custom Date Range": "custom",
+    }
+    selected_view_label = st.sidebar.radio("View", list(VIEW_LABELS.keys()))
+    view = VIEW_LABELS[selected_view_label]
+
+    date_from = None
+    date_to = None
+    if view == "custom":
+        date_from = st.sidebar.date_input("From date")
+        date_to = st.sidebar.date_input("To date")
+
+    if view == "latest_run" and not run_ctx["has_runs"]:
+        st.sidebar.caption(
+            "No pipeline runs found — showing all active leads instead."
+        )
+
+    # ── Sidebar: Filters ──────────────────────────────────────────────────────
+    st.sidebar.markdown("**Filters**")
+
+    source_options = {"All sources": None}
+    for s in source_list:
+        source_options[s["name"]] = s["id"]
+    selected_source_label = st.sidebar.selectbox("Source", list(source_options.keys()))
+    source_filter_id = source_options[selected_source_label]
+
     tier_options = ["All", "hot", "warm", "cold", "archive"]
-    selected_tier = st.sidebar.selectbox("Filter by Tier", tier_options)
+    selected_tier = st.sidebar.selectbox("Tier", tier_options)
     tier_filter = None if selected_tier == "All" else selected_tier
 
+    status_options = ["All", "research", "approved", "rejected", "needs_research", "archived"]
+    selected_status = st.sidebar.selectbox("Review Status", status_options)
+    status_filter = None if selected_status == "All" else selected_status
+
+    has_contact_filter = st.sidebar.checkbox("Has contactability record")
+    has_url_filter = st.sidebar.checkbox("Has evidence URL")
+
+    # ── Sidebar: Sort ─────────────────────────────────────────────────────────
+    st.sidebar.markdown("**Sort by**")
+    SORT_LABELS = {
+        "Highest score": "score_desc",
+        "Newest first": "newest_first",
+        "Latest updated": "latest_updated",
+        "Latest evidence date": "latest_evidence",
+        "Largest award amount": "largest_award",
+    }
+    selected_sort_label = st.sidebar.radio("Sort", list(SORT_LABELS.keys()))
+    sort_by = SORT_LABELS[selected_sort_label]
+
+    # ── Query ─────────────────────────────────────────────────────────────────
+    latest_run_started_at = run_ctx["started_at"] if run_ctx["has_runs"] else None
+
     with SessionLocal() as db:
-        leads = list_reviewable_leads(db, tier=tier_filter)
+        lead_rows = list_leads_filtered(
+            db,
+            view=view,
+            tier=tier_filter,
+            source_id=source_filter_id,
+            sales_status=status_filter,
+            has_contactability=True if has_contact_filter else None,
+            has_evidence_url=True if has_url_filter else None,
+            date_from=date_from,
+            date_to=date_to,
+            sort_by=sort_by,
+            latest_run_started_at=latest_run_started_at,
+        )
 
-    st.subheader("Active Leads")
+    # ── View label with approximation notice ─────────────────────────────────
+    view_title = selected_view_label
+    if view == "latest_run":
+        view_title += (
+            " — approximate: uses updated_at ≥ run.started_at as proxy "
+            "(lead_candidates has no first_seen_pipeline_run_id or "
+            "last_touched_pipeline_run_id; see schema gap note below)"
+        )
 
-    # Summary metrics — computed from already-loaded leads, no extra DB call
-    total = len(leads)
-    hot_count = sum(1 for lead in leads if lead.tier == "hot")
-    warm_count = sum(1 for lead in leads if lead.tier == "warm")
-    cold_count = sum(1 for lead in leads if lead.tier == "cold")
+    st.subheader(view_title)
+
+    # Summary metrics — derived from already-loaded rows
+    total = len(lead_rows)
+    hot_count = sum(1 for r in lead_rows if r["lead"].tier == "hot")
+    warm_count = sum(1 for r in lead_rows if r["lead"].tier == "warm")
+    cold_count = sum(1 for r in lead_rows if r["lead"].tier == "cold")
     m1, m2, m3, m4 = st.columns(4)
-    m1.metric("Active Leads", total)
+    m1.metric("Leads Shown", total)
     m2.metric("Hot", hot_count)
     m3.metric("Warm", warm_count)
     m4.metric("Cold", cold_count)
 
-    if not leads:
-        st.info("No active leads found for this filter.")
+    if not lead_rows:
+        st.info("No active leads found for the selected view and filters.")
     else:
         st.info("Click a Lead ID cell to copy it, then paste into Lead Detail.")
-        rows = [
+        table_rows = [
             {
                 "Company": (
-                    lead.company.canonical_name if lead.company else str(lead.company_id)
+                    r["company"].canonical_name
+                    if r["company"]
+                    else str(r["lead"].company_id)
                 ),
-                "Tier": lead.tier or "Not available",
+                "Tier": r["lead"].tier or "—",
                 "Score": (
-                    str(lead.current_score)
-                    if lead.current_score is not None
-                    else "Not available"
+                    str(r["lead"].current_score)
+                    if r["lead"].current_score is not None
+                    else "—"
                 ),
-                "Review Status": lead.sales_status or "Not available",
-                "Lead ID": str(lead.id),
+                "Primary Source": r["primary_source"] or "—",
+                # "First seen" = when the lead first entered Porter's database (run date)
+                "First Seen (run date)": format_date(r["lead"].created_at),
+                # "Last updated" = when the lead received new evidence or changed status
+                "Last Updated (run date)": format_date(r["lead"].updated_at),
+                # "Evidence date" = when the award/event happened
+                "Latest Evidence Date": format_date(r["latest_signal_date"]),
+                "Updated in Run Window?": "Yes (approx.)" if r["is_new_in_run"] else "No",
+                "Review Status": r["lead"].sales_status or "—",
+                "Lead ID": str(r["lead"].id),
             }
-            for lead in leads
+            for r in lead_rows
         ]
-        st.dataframe(rows, hide_index=True)
+        st.dataframe(table_rows, hide_index=True)
+
+    if view == "latest_run":
+        st.caption(
+            "**Schema gap:** `lead_candidates` has no `first_seen_pipeline_run_id` or "
+            "`last_touched_pipeline_run_id` column, so 'Latest Run Results' cannot be exact. "
+            "It uses `updated_at ≥ run.started_at` as a proxy — a lead that received a review "
+            "decision during the run window also appears here. "
+            "To fix: add `first_seen_pipeline_run_id UUID REFERENCES pipeline_runs(id)` "
+            "to `lead_candidates` via a new Alembic migration (not yet applied)."
+        )
 
 # ── Lead Detail ────────────────────────────────────────────────────────────────
 elif page == "Lead Detail":

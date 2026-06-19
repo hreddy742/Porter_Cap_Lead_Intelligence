@@ -13,11 +13,11 @@ from __future__ import annotations
 
 import os
 import uuid
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session, joinedload
 
 from app.db.models import (
@@ -26,9 +26,13 @@ from app.db.models import (
     EvidenceItem,
     LeadCandidate,
     LeadScore,
+    PipelineRun,
     ReviewDecision,
     Signal,
+    SourceRegistry,
+    SourceRun,
 )
+from app.ops.health import get_latest_pipeline_health
 
 VALID_ACTIONS = frozenset({
     "approve",
@@ -381,3 +385,232 @@ def format_date(value) -> str:
     if value is None:
         return "Not available"
     return str(value)
+
+
+# ─── Pipeline run context ──────────────────────────────────────────────────────
+
+def get_latest_run_context(db: Session) -> dict:
+    """Return the latest pipeline run stats for the dashboard header. Read-only.
+
+    Extends get_latest_pipeline_health with leads_scored (sum of tier buckets
+    from the pipeline_runs row, which the orchestrator writes at completion).
+
+    Schema gap note: evidence_items_created, companies_resolved, signals_created
+    are not written to pipeline_runs or source_runs — returned as None.
+    """
+    health = get_latest_pipeline_health(db)
+    if not health["has_runs"]:
+        return {**health, "leads_scored": None}
+    run = db.query(PipelineRun).order_by(PipelineRun.started_at.desc()).first()
+    leads_scored = None
+    if run is not None:
+        leads_scored = (
+            (run.total_hot or 0)
+            + (run.total_warm or 0)
+            + (run.total_cold or 0)
+            + (run.total_archive or 0)
+        )
+    return {**health, "leads_scored": leads_scored}
+
+
+# ─── Source list for filter dropdown ──────────────────────────────────────────
+
+def get_source_list(db: Session) -> list[dict]:
+    """Return [{id, name}] for all sources in source_registry, ordered by name."""
+    sources = db.execute(
+        select(SourceRegistry).order_by(SourceRegistry.name)
+    ).scalars().all()
+    return [{"id": s.id, "name": s.name} for s in sources]
+
+
+# ─── Enhanced lead list with view/filter/sort ─────────────────────────────────
+
+def list_leads_filtered(
+    db: Session,
+    *,
+    view: str = "all",
+    tier: str | None = None,
+    source_id: UUID | None = None,
+    sales_status: str | None = None,
+    has_contactability: bool | None = None,
+    has_evidence_url: bool | None = None,
+    date_from: date | None = None,
+    date_to: date | None = None,
+    sort_by: str = "score_desc",
+    latest_run_started_at: datetime | None = None,
+) -> list[dict]:
+    """Enhanced lead list with view selector, filters, and sorting.
+
+    view values:
+        "all"              — all active leads (default)
+        "latest_run"       — leads whose updated_at >= latest_run_started_at
+                             (approximate: uses updated_at as proxy for
+                              "scored/touched in this run" because
+                              lead_candidates has no pipeline_run_id FK)
+        "today"            — leads created today UTC
+        "recently_updated" — leads updated in the last 7 days
+        "custom"           — leads created within [date_from, date_to]
+
+    sort_by values:
+        "score_desc"      — highest current_score first (default)
+        "newest_first"    — created_at DESC
+        "latest_updated"  — updated_at DESC
+        "latest_evidence" — latest signal_date DESC (Python sort after DB fetch)
+        "largest_award"   — max signal award_amount DESC (Python sort after DB fetch)
+
+    Returns a list of dicts, one per lead:
+        lead              — LeadCandidate ORM object (company pre-loaded)
+        company           — Company ORM object (same as lead.company)
+        primary_source    — source_registry.name for the first source of this company
+        latest_signal_date — date | None
+        max_award_amount  — Decimal | None
+        is_new_in_run     — True if lead.created_at >= latest_run_started_at
+                             (approximate: lead_candidates has no first_seen_pipeline_run_id
+                              or last_touched_pipeline_run_id FK, so created_at is used as proxy)
+    """
+    stmt = (
+        select(LeadCandidate)
+        .options(joinedload(LeadCandidate.company))
+        .join(Company, LeadCandidate.company_id == Company.id)
+        .where(LeadCandidate.status == "active")
+        .where(Company.deleted_at.is_(None))
+    )
+
+    # ── View filter ───────────────────────────────────────────────────────────
+    if view == "today":
+        today_start = datetime.now(timezone.utc).replace(
+            hour=0, minute=0, second=0, microsecond=0
+        )
+        stmt = stmt.where(LeadCandidate.created_at >= today_start)
+    elif view == "recently_updated":
+        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+        stmt = stmt.where(LeadCandidate.updated_at >= cutoff)
+    elif view == "latest_run" and latest_run_started_at is not None:
+        stmt = stmt.where(LeadCandidate.updated_at >= latest_run_started_at)
+    elif view == "custom":
+        if date_from is not None:
+            dt_from = datetime(
+                date_from.year, date_from.month, date_from.day, tzinfo=timezone.utc
+            )
+            stmt = stmt.where(LeadCandidate.created_at >= dt_from)
+        if date_to is not None:
+            dt_to = datetime(
+                date_to.year, date_to.month, date_to.day, 23, 59, 59, tzinfo=timezone.utc
+            )
+            stmt = stmt.where(LeadCandidate.created_at <= dt_to)
+
+    # ── Column filters ────────────────────────────────────────────────────────
+    if tier:
+        stmt = stmt.where(LeadCandidate.tier == tier)
+    if sales_status:
+        stmt = stmt.where(LeadCandidate.sales_status == sales_status)
+    if source_id is not None:
+        source_subq = (
+            select(EvidenceItem.company_id)
+            .where(EvidenceItem.source_id == source_id)
+            .where(EvidenceItem.company_id.isnot(None))
+        )
+        stmt = stmt.where(LeadCandidate.company_id.in_(source_subq))
+    if has_contactability is True:
+        contact_subq = select(CompanyContactability.company_id)
+        stmt = stmt.where(LeadCandidate.company_id.in_(contact_subq))
+    elif has_contactability is False:
+        contact_subq = select(CompanyContactability.company_id)
+        stmt = stmt.where(LeadCandidate.company_id.not_in(contact_subq))
+    if has_evidence_url is True:
+        url_subq = (
+            select(EvidenceItem.company_id)
+            .where(EvidenceItem.source_url.isnot(None))
+            .where(EvidenceItem.company_id.isnot(None))
+        )
+        stmt = stmt.where(LeadCandidate.company_id.in_(url_subq))
+
+    # ── SQL-level sorting (for non-signal sorts) ──────────────────────────────
+    if sort_by == "newest_first":
+        stmt = stmt.order_by(LeadCandidate.created_at.desc())
+    elif sort_by == "latest_updated":
+        stmt = stmt.order_by(LeadCandidate.updated_at.desc())
+    else:
+        stmt = stmt.order_by(LeadCandidate.current_score.desc().nullslast())
+
+    leads = list(db.execute(stmt).scalars().all())
+
+    if not leads:
+        return []
+
+    company_ids = [lead.company_id for lead in leads]
+
+    # ── Bulk: signal aggregates per company ───────────────────────────────────
+    sig_rows = db.execute(
+        select(
+            Signal.company_id,
+            func.max(Signal.signal_date).label("latest_signal_date"),
+            func.max(Signal.award_amount).label("max_award"),
+        )
+        .where(Signal.company_id.in_(company_ids))
+        .group_by(Signal.company_id)
+    ).all()
+    latest_signal_date_by_company: dict = {
+        row.company_id: row.latest_signal_date for row in sig_rows
+    }
+    max_award_by_company: dict = {
+        row.company_id: (
+            Decimal(str(row.max_award)) if row.max_award is not None else None
+        )
+        for row in sig_rows
+    }
+
+    # ── Bulk: primary source per company ──────────────────────────────────────
+    primary_source_by_company = _get_primary_source_by_company(company_ids, db)
+
+    # ── Python-level sorting for signal-based sorts ───────────────────────────
+    if sort_by == "latest_evidence":
+        leads = sorted(
+            leads,
+            key=lambda lc: latest_signal_date_by_company.get(lc.company_id) or date.min,
+            reverse=True,
+        )
+    elif sort_by == "largest_award":
+        leads = sorted(
+            leads,
+            key=lambda lc: max_award_by_company.get(lc.company_id) or Decimal("0"),
+            reverse=True,
+        )
+
+    # ── Assemble result rows ──────────────────────────────────────────────────
+    rows = []
+    for lead in leads:
+        cid = lead.company_id
+        rows.append({
+            "lead": lead,
+            "company": lead.company,
+            "primary_source": primary_source_by_company.get(cid),
+            "latest_signal_date": latest_signal_date_by_company.get(cid),
+            "max_award_amount": max_award_by_company.get(cid),
+            "is_new_in_run": (
+                latest_run_started_at is not None
+                and lead.created_at is not None
+                and lead.created_at >= latest_run_started_at
+            ),
+        })
+    return rows
+
+
+def _get_primary_source_by_company(company_ids: list, db: Session) -> dict:
+    """Return {company_id: source_name} for each company's first source."""
+    if not company_ids:
+        return {}
+    rows = db.execute(
+        select(
+            EvidenceItem.company_id,
+            SourceRegistry.name.label("source_name"),
+        )
+        .join(SourceRegistry, EvidenceItem.source_id == SourceRegistry.id)
+        .where(EvidenceItem.company_id.in_(company_ids))
+        .group_by(EvidenceItem.company_id, SourceRegistry.name)
+    ).all()
+    result: dict = {}
+    for row in rows:
+        if row.company_id not in result:
+            result[row.company_id] = row.source_name
+    return result
