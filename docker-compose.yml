@@ -39,6 +39,18 @@ services:
       - .:/app
     command: streamlit run app/dashboard/app.py --server.port 8501 --server.address 0.0.0.0
 
+  api:
+    build: .
+    env_file: .env
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"      # FastAPI
+    volumes:
+      - .:/app
+    command: uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload
+
 volumes:
   postgres_data:
 
