@@ -26,6 +26,7 @@ services:
     volumes:
       - .:/app           # mount source for development
     command: python -m scripts.run_pipeline
+    restart: unless-stopped
 
   dashboard:
     build: .
