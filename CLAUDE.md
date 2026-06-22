@@ -89,7 +89,7 @@ Algorithm priority: UEI → domain → normalized_name+state
 
 ## Build status
 
-Last committed: 2026-06-22 — fix: seed scoring_configs in migration 003, lower Hot threshold to 70
+Last committed: 2026-06-22 — feat: add pipeline run loop with PIPELINE_INTERVAL_HOURS
 
 | Component               | Status                                                     |
 |-------------------------|------------------------------------------------------------|
@@ -97,3 +97,4 @@ Last committed: 2026-06-22 — fix: seed scoring_configs in migration 003, lower
 | Next.js frontend shell  | Built, committed — not authenticated, not production ready |
 | tests/test_api.py       | Built, validated, committed to git                         |
 | scoring_configs         | Seeded via migration 003. Hot threshold: 70. Fresh deployments work without manual intervention. |
+| Pipeline scheduling     | run_loop added to run_pipeline.py. PIPELINE_INTERVAL_HOURS env var controls interval (default 6h). Set to 0 for one-shot run. docker-compose restarts on crash. |
