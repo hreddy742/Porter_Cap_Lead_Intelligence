@@ -89,13 +89,14 @@ Algorithm priority: UEI → domain → normalized_name+state
 
 ## Build status
 
-Last committed: 2026-06-22 — fix: sort subawards by amount desc, add start page config
+Last committed: 2026-06-22 — fix: rescore stale leads under new 70-point hot threshold
 
 | Component               | Status                                                     |
 |-------------------------|------------------------------------------------------------|
 | FastAPI read-only layer | Built, validated, committed to git                         |
 | Next.js frontend shell  | Built, committed — not authenticated, not production ready |
 | tests/test_api.py       | Built, validated, committed to git                         |
-| scoring_configs         | Seeded via migration 003. Hot threshold: 70. Fresh deployments work without manual intervention. |
+| scoring_configs         | Seeded via migration 003. Hot threshold: 70. Live DB row updated to phase1-v1-corrected with full config JSON (was empty {}). Fresh deployments work without manual intervention. |
+| Stale lead rescore      | scripts/rescore_stale_leads.py — one-off run on 2026-06-22 moved 2 companies (CAPITAL BRAND GROUP LLC, VETERAN TECHNOLOGY PARTNERS LLC) from warm→hot at score=73. Script inserts new versioned lead_scores rows; never updates historical rows. duplicate_active gate intentionally bypassed (data correction, not pipeline re-run). |
 | Pipeline scheduling     | run_loop added to run_pipeline.py. PIPELINE_INTERVAL_HOURS env var controls interval (default 6h). Set to 0 for one-shot run. docker-compose restarts on crash. |
 | USASpending subawards   | Second source built, committed. connector: app/pipeline/connectors/usaspending_subawards.py. claim_supported=SUBCONTRACT_AWARD. Source seeded enabled=False — enable after UAT of 20+ leads. API filters silently ignored; $1B amount cap + year 2000-2030 date guard in Pydantic validator. No UEI/NAICS/state in API response. Noise keyword filter (_NOISE_KEYWORDS / _SIGNAL_KEYWORDS) quarantines CCDBG childcare/social-service records; annotates signal matches in payload["description_signal_keyword"]. Sort: amount desc (not id desc — id desc surfaced CCDBG batch at top, 99.5% noise). USASPENDING_SUBAWARDS_START_PAGE=500 (default) skips $1B+ corrupt rows at pages 1-499. Live test at page 500: 186/200 valid (93%), 14 quarantined. |
