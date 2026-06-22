@@ -68,6 +68,32 @@ _DATE_YEAR_MAX = 2030
 
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
+# Records whose description matches a noise keyword are quarantined before DB write.
+# These are social-service grants, not A/R-financing candidates.
+_NOISE_KEYWORDS = frozenset({
+    "childcare", "child care", "child development", "early learning",
+    "head start", "daycare", "day care", "preschool", "pre-school",
+    "after school", "afterschool", "foster care", "homeless shelter",
+    "food bank", "food pantry", "nutrition program", "snap benefit",
+    "wic program", "housing assistance", "rental assistance",
+    "substance abuse", "mental health counseling", "drug treatment",
+    "domestic violence", "senior center", "adult day care",
+    "disability services", "special education",
+})
+
+# Records matching a signal keyword are annotated in payload["description_signal_keyword"].
+# They still pass through — gates decide eligibility.
+_SIGNAL_KEYWORDS = frozenset({
+    "manufacturing", "fabrication", "assembly", "machining",
+    "staffing", "temporary staffing", "labor services",
+    "distribution", "logistics", "warehousing", "freight",
+    "information technology", "software", "systems integration",
+    "construction", "engineering services", "technical services",
+    "maintenance", "repair", "overhaul", "equipment",
+    "supplies", "materials", "components", "parts",
+    "professional services", "consulting", "training",
+})
+
 
 class ConnectorError(Exception):
     """Raised when all retry attempts for a transient connector error are exhausted."""
@@ -316,6 +342,25 @@ class USASpendingSubawardsConnector:
             )
             return
 
+        desc = (record.description or "").lower()
+
+        for kw in _NOISE_KEYWORDS:
+            if kw in desc:
+                self.source_run.quarantine_count += 1
+                self._log.info(
+                    "subaward_quarantine_noise_keyword",
+                    record_id=record.record_id,
+                    recipient=record.recipient_name,
+                    matched_keyword=kw,
+                )
+                return
+
+        signal_keyword: str | None = None
+        for kw in _SIGNAL_KEYWORDS:
+            if kw in desc:
+                signal_keyword = kw
+                break
+
         content_hash = hashlib.sha256(
             json.dumps(raw, sort_keys=True, default=str).encode()
         ).hexdigest()
@@ -331,12 +376,16 @@ class USASpendingSubawardsConnector:
             self.source_run.records_skipped += 1
             return
 
+        payload: dict = dict(raw)
+        if signal_keyword is not None:
+            payload["description_signal_keyword"] = signal_keyword
+
         event = RawSourceEvent(
             source_id=self.source.id,
             source_run_id=self.source_run.id,
             source_record_id=str(record.record_id),
             company_name_raw=record.recipient_name,
-            payload=raw,
+            payload=payload,
             content_hash=content_hash,
             source_url=f"https://www.usaspending.gov/subaward/?id={record.record_id}",
         )

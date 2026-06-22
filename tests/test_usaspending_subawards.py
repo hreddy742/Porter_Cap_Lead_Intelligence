@@ -682,3 +682,68 @@ def test_record_model_rejects_year_6010_date():
     raw = {**_subaward(1), "action_date": "6010-11-01"}
     with pytest.raises(ValidationError):
         USASpendingSubawardsRecord.model_validate(raw)
+
+
+# ─── Test 28: noise keyword → quarantine ─────────────────────────────────────
+
+
+def test_noise_keyword_in_description_quarantines_record():
+    """A record whose description contains a noise keyword must be quarantined, not stored."""
+    noisy = {**_subaward(1), "description": "CCDBG CHILDCARE SERVICES SUBGRANT AWARD"}
+    pages = [_mock_response([noisy], has_next=False)]
+
+    source_run, session, _client = _run_connector(responses=pages)
+
+    assert source_run.quarantine_count == 1
+    assert source_run.records_valid == 0
+    assert source_run.records_fetched == 1
+    session.add.assert_not_called()
+
+
+# ─── Test 29: signal keyword → passes and annotated ──────────────────────────
+
+
+def test_signal_keyword_in_description_passes_and_annotated():
+    """A record with a signal keyword passes through; payload['description_signal_keyword'] is set."""
+    from app.pipeline.connectors.usaspending_subawards import _SIGNAL_KEYWORDS
+
+    signal_record = {**_subaward(1), "description": "STAFFING AND LABOR SERVICES CONTRACT"}
+    pages = [_mock_response([signal_record], has_next=False)]
+
+    source_run, session, _client = _run_connector(responses=pages)
+
+    assert source_run.records_valid == 1
+    assert source_run.quarantine_count == 0
+    added = session.add.call_args[0][0]
+    assert "description_signal_keyword" in added.payload
+    assert added.payload["description_signal_keyword"] in _SIGNAL_KEYWORDS
+
+
+# ─── Test 30: no keyword match → passes, payload not annotated ────────────────
+
+
+def test_no_keyword_match_passes_without_annotation():
+    """A description matching neither noise nor signal keywords passes through unchanged."""
+    neutral = {**_subaward(1), "description": "GENERAL CONTRACT SERVICES ORDER 42"}
+    pages = [_mock_response([neutral], has_next=False)]
+
+    source_run, session, _client = _run_connector(responses=pages)
+
+    assert source_run.records_valid == 1
+    assert source_run.quarantine_count == 0
+    added = session.add.call_args[0][0]
+    assert "description_signal_keyword" not in added.payload
+
+
+# ─── Test 31: empty / null description → passes ──────────────────────────────
+
+
+def test_null_description_passes_through():
+    """A record with description=None passes through; quarantine_count stays zero."""
+    null_desc = {**_subaward(1), "description": None}
+    pages = [_mock_response([null_desc], has_next=False)]
+
+    source_run, _session, _client = _run_connector(responses=pages)
+
+    assert source_run.records_valid == 1
+    assert source_run.quarantine_count == 0
