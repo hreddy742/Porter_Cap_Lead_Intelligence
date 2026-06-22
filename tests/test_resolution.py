@@ -89,8 +89,12 @@ def _make_session(
             result.scalar_one_or_none.return_value = identifier
         elif "duplicate_review" in stmt_str:
             result.scalar_one_or_none.return_value = existing_duplicate
-        else:
+        elif "deleted_at IS NULL" in stmt_str:
+            # fuzzy candidates: SELECT companies WHERE deleted_at IS NULL
             result.scalars.return_value.all.return_value = fuzzy_companies or []
+        else:
+            # external_id existence check before INSERT — no existing company by default
+            result.scalar_one_or_none.return_value = None
         return result
 
     s = MagicMock()

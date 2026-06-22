@@ -144,8 +144,23 @@ def resolve_company_for_evidence(evidence_id: UUID, db: Session) -> Company | No
         log.info("resolution_matched_existing", company_id=str(company.id))
         return company
 
-    # No hard match → create a new company
+    # No hard match → compute external_id and check if company already exists.
+    # This handles re-runs: the same name+state produces the same external_id, and
+    # we should return the existing record rather than raise UniqueViolation.
     external_id = _compute_external_id(uei, domain, normalized_name, state)
+    existing_by_ext_id = db.execute(
+        select(Company).where(Company.external_id == external_id)
+    ).scalar_one_or_none()
+    if existing_by_ext_id is not None:
+        if not existing_by_ext_id.naics_code and naics_code:
+            existing_by_ext_id.naics_code = naics_code
+        if not existing_by_ext_id.naics_description and naics_description:
+            existing_by_ext_id.naics_description = naics_description
+        evidence.company_id = existing_by_ext_id.id
+        db.flush()
+        log.info("resolution_matched_by_external_id", company_id=str(existing_by_ext_id.id))
+        return existing_by_ext_id
+
     company = Company(
         canonical_name=company_name_raw,
         normalized_name=normalized_name,

@@ -179,7 +179,7 @@ def _extract_subaward_evidence(
         "company_name": company_name,
         "uei": None,
         "award_amount": str(amount_raw) if amount_raw is not None else None,
-        "award_date": action_date.isoformat(),
+        "action_date": action_date.isoformat(),
         "description": payload.get("description"),
         "subaward_number": payload.get("subaward_number"),
         "prime_contractor": None,
