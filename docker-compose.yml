@@ -20,6 +20,8 @@ services:
   app:
     build: .
     env_file: .env
+    environment:
+      DATABASE_URL: postgresql://porter:localdev@db:5432/porter_leads
     depends_on:
       db:
         condition: service_healthy
@@ -31,6 +33,8 @@ services:
   dashboard:
     build: .
     env_file: .env
+    environment:
+      DATABASE_URL: postgresql://porter:localdev@db:5432/porter_leads
     depends_on:
       db:
         condition: service_healthy
@@ -43,6 +47,8 @@ services:
   api:
     build: .
     env_file: .env
+    environment:
+      DATABASE_URL: postgresql://porter:localdev@db:5432/porter_leads
     depends_on:
       db:
         condition: service_healthy
