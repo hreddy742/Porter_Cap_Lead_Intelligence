@@ -22,6 +22,7 @@ from sqlalchemy.orm import Session
 from app.db.models import PipelineRun, RawSourceEvent, SourceRegistry, SourceRun
 from app.ops.sentry import capture_exception
 from app.pipeline.connectors.usaspending import USASpendingConnector
+from app.pipeline.connectors.usaspending_subawards import USASpendingSubawardsConnector
 from app.processing.evidence import extract_evidence
 from app.processing.resolution import resolve_company_for_evidence
 from app.processing.scoring import score_company
@@ -63,6 +64,10 @@ def _is_usaspending(source: SourceRegistry) -> bool:
     return source.name.lower() == "usaspending"
 
 
+def _is_usaspending_subawards(source: SourceRegistry) -> bool:
+    return source.name.lower() == "usaspending_subawards"
+
+
 def _execute_source(
     source: SourceRegistry,
     source_run: SourceRun,
@@ -80,6 +85,9 @@ def _execute_source(
         if _is_usaspending(source):
             connector = USASpendingConnector(db, source_run, source)
             connector.run()  # sets source_run.status; calls db.commit() internally
+        elif _is_usaspending_subawards(source):
+            connector = USASpendingSubawardsConnector(db, source_run, source)
+            connector.run()
         else:
             log.warning("orchestrator_unknown_source_skipped", source_name=source.name)
             source_run.status = "completed"
