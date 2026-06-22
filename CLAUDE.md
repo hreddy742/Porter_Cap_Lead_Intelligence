@@ -89,7 +89,7 @@ Algorithm priority: UEI → domain → normalized_name+state
 
 ## Build status
 
-Last committed: 2026-06-22 — fix: add noise keyword filter to subawards connector
+Last committed: 2026-06-22 — fix: sort subawards by amount desc, add start page config
 
 | Component               | Status                                                     |
 |-------------------------|------------------------------------------------------------|
@@ -98,4 +98,4 @@ Last committed: 2026-06-22 — fix: add noise keyword filter to subawards connec
 | tests/test_api.py       | Built, validated, committed to git                         |
 | scoring_configs         | Seeded via migration 003. Hot threshold: 70. Fresh deployments work without manual intervention. |
 | Pipeline scheduling     | run_loop added to run_pipeline.py. PIPELINE_INTERVAL_HOURS env var controls interval (default 6h). Set to 0 for one-shot run. docker-compose restarts on crash. |
-| USASpending subawards   | Second source built, committed. connector: app/pipeline/connectors/usaspending_subawards.py. claim_supported=SUBCONTRACT_AWARD. Source seeded enabled=False — enable after UAT of 20+ leads. API filters silently ignored; sorts by id desc; $1B amount cap + year 2000-2030 date guard in Pydantic validator. No UEI/NAICS/state in API response. Noise keyword filter (_NOISE_KEYWORDS / _SIGNAL_KEYWORDS) added 2026-06-22 — quarantines CCDBG childcare/social-service records before DB write; annotates signal matches in payload["description_signal_keyword"]. Live test: 949/954 records quarantined in first 10 pages (top of dataset is CCDBG nutrition-program batches). |
+| USASpending subawards   | Second source built, committed. connector: app/pipeline/connectors/usaspending_subawards.py. claim_supported=SUBCONTRACT_AWARD. Source seeded enabled=False — enable after UAT of 20+ leads. API filters silently ignored; $1B amount cap + year 2000-2030 date guard in Pydantic validator. No UEI/NAICS/state in API response. Noise keyword filter (_NOISE_KEYWORDS / _SIGNAL_KEYWORDS) quarantines CCDBG childcare/social-service records; annotates signal matches in payload["description_signal_keyword"]. Sort: amount desc (not id desc — id desc surfaced CCDBG batch at top, 99.5% noise). USASPENDING_SUBAWARDS_START_PAGE=500 (default) skips $1B+ corrupt rows at pages 1-499. Live test at page 500: 186/200 valid (93%), 14 quarantined. |
