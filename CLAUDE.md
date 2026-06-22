@@ -86,3 +86,14 @@ Algorithm priority: UEI → domain → normalized_name+state
 - Put any business logic in Streamlit — it belongs in app/processing/
 - Use array_length() for empty-array checks — use cardinality()
 - Trust X-Forwarded-Email from client — strip it in Caddy before auth
+
+## Build status
+
+Last committed: 2026-06-22 — fix: seed scoring_configs in migration 003, lower Hot threshold to 70
+
+| Component               | Status                                                     |
+|-------------------------|------------------------------------------------------------|
+| FastAPI read-only layer | Built, validated, committed to git                         |
+| Next.js frontend shell  | Built, committed — not authenticated, not production ready |
+| tests/test_api.py       | Built, validated, committed to git                         |
+| scoring_configs         | Seeded via migration 003. Hot threshold: 70. Fresh deployments work without manual intervention. |
