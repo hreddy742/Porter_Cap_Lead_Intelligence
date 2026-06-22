@@ -60,7 +60,7 @@ _CONTRACT_AWARD = "CONTRACT_AWARD"
 _AR_FIT_PHASE1_CAP = 10
 
 # Tier thresholds (inclusive lower bound).
-_TIER_HOT = 75
+_TIER_HOT = 70
 _TIER_WARM = 55
 _TIER_COLD = 35
 

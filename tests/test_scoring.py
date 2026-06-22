@@ -311,16 +311,16 @@ def test_scoring_is_deterministic(mock_gates):
 
 
 def test_hot_threshold():
-    """Score >= 75 maps to 'hot'."""
-    assert _assign_tier(75) == "hot"
+    """Score >= 70 maps to 'hot'."""
+    assert _assign_tier(70) == "hot"
     assert _assign_tier(100) == "hot"
-    assert _assign_tier(76) == "hot"
+    assert _assign_tier(73) == "hot"
 
 
 def test_warm_threshold():
-    """Score >= 55 and < 75 maps to 'warm'."""
+    """Score >= 55 and < 70 maps to 'warm'."""
     assert _assign_tier(55) == "warm"
-    assert _assign_tier(74) == "warm"
+    assert _assign_tier(69) == "warm"
     assert _assign_tier(60) == "warm"
 
 
