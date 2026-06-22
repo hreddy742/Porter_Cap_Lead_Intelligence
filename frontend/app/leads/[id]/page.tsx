@@ -219,9 +219,10 @@ function ReviewCard({ rd }: { rd: ReviewDecision }) {
 // ── Score breakdown ─────────────────────────────────────────────────────────────
 
 function ScoreBreakdown({ score }: { score: ScoreDetail }) {
-  const breakdown = score.component_breakdown as Record<string, number>;
+  type BreakdownEntry = { points: number; max: number };
+  const breakdown = score.component_breakdown as Record<string, BreakdownEntry>;
   const entries = Object.entries(breakdown).filter(
-    ([, v]) => typeof v === "number"
+    ([, v]) => typeof v === "object" && v !== null && "points" in v
   );
 
   return (
@@ -245,7 +246,7 @@ function ScoreBreakdown({ score }: { score: ScoreDetail }) {
                 {key.replace(/_/g, " ")}
               </span>
               <span className="text-[12px] font-semibold tabular-nums text-slate-800">
-                {value}
+                {value.points} / {value.max}
               </span>
             </div>
           ))}
