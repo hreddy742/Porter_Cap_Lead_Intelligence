@@ -579,3 +579,58 @@ def test_rescore_stale_warm_company_becomes_hot(mock_gates):
     assert existing_lead.tier == "hot", (
         f"existing_lead.tier should be 'hot', got '{existing_lead.tier}'"
     )
+
+
+# ─── Test 20: SUBCONTRACT_AWARD scores why_now and ar_fit ────────────────────
+
+
+@patch("app.processing.scoring.evaluate_mandatory_gates")
+def test_subcontract_award_signal_scores_why_now_and_ar_fit(mock_gates):
+    """
+    A SUBCONTRACT_AWARD signal must contribute to why_now and ar_fit, not score 0.
+
+    Before the fix, the engine filtered on signal_type == 'CONTRACT_AWARD' only,
+    leaving SUBCONTRACT_AWARD signals invisible to both components. After the fix,
+    _AWARD_SIGNAL_TYPES includes both types and subaward companies score correctly.
+
+    Profile used (subaward company without NAICS — matches real subawards API data):
+      - signal_type=SUBCONTRACT_AWARD, freshness=0.74 → why_now=18 (0.5 ≤ fs < 0.8)
+      - NAICS=None → no NAICS bonus in ar_fit or porter_fit
+      - ar_fit gets +3 from the contract signal alone
+    """
+    mock_gates.return_value = _GATE_PASSED
+
+    company = _make_company(naics_code=None, country="US")
+    cfg = _make_scoring_config()
+    ev = _make_evidence(source_url="https://usaspending.gov/subaward/1")
+    signal = _make_signal(
+        signal_type="SUBCONTRACT_AWARD",
+        freshness_score=0.74,
+        award_amount=14_280_573.0,
+        evidence_id=ev.id,
+    )
+
+    db = _clean_session(company, cfg, [ev], [signal])
+    result = score_company(company.id, db)
+
+    assert result["scored"] is True
+
+    breakdown = result["component_breakdown"]
+
+    # why_now must pick up the SUBCONTRACT_AWARD signal (freshness 0.74 → 18 pts).
+    assert breakdown["why_now"]["points"] == 18, (
+        f"why_now should be 18 for freshness=0.74 SUBCONTRACT_AWARD, "
+        f"got {breakdown['why_now']['points']}"
+    )
+
+    # ar_fit must pick up the contract signal (+3 for having any award signal).
+    assert breakdown["ar_fit"]["points"] == 3, (
+        f"ar_fit should be 3 for SUBCONTRACT_AWARD signal (no NAICS), "
+        f"got {breakdown['ar_fit']['points']}"
+    )
+
+    # Total must be above 8 (the pre-fix broken score).
+    assert result["total_score"] > 8, (
+        f"SUBCONTRACT_AWARD company scored {result['total_score']}, "
+        "expected > 8 (pre-fix broken score)"
+    )

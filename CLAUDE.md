@@ -89,7 +89,7 @@ Algorithm priority: UEI → domain → normalized_name+state
 
 ## Build status
 
-Last committed: 2026-06-22 — fix: rescore stale leads under new 70-point hot threshold
+Last committed: 2026-06-22 — fix: scoring engine recognizes SUBCONTRACT_AWARD signals
 
 | Component               | Status                                                     |
 |-------------------------|------------------------------------------------------------|
@@ -98,5 +98,6 @@ Last committed: 2026-06-22 — fix: rescore stale leads under new 70-point hot t
 | tests/test_api.py       | Built, validated, committed to git                         |
 | scoring_configs         | Seeded via migration 003. Hot threshold: 70. Live DB row updated to phase1-v1-corrected with full config JSON (was empty {}). Fresh deployments work without manual intervention. |
 | Stale lead rescore      | scripts/rescore_stale_leads.py — one-off run on 2026-06-22 moved 2 companies (CAPITAL BRAND GROUP LLC, VETERAN TECHNOLOGY PARTNERS LLC) from warm→hot at score=73. Script inserts new versioned lead_scores rows; never updates historical rows. duplicate_active gate intentionally bypassed (data correction, not pipeline re-run). |
+| Scoring — award signals | _AWARD_SIGNAL_TYPES = frozenset({"CONTRACT_AWARD","SUBCONTRACT_AWARD"}) in scoring.py. Both why_now (max 30) and ar_fit components now score SUBCONTRACT_AWARD signals. Previously only CONTRACT_AWARD was recognized, leaving subaward companies at why_now=0. Known gap: subaward companies still score low without NAICS enrichment — the subawards API returns no NAICS, UEI, or state, so the +15 NAICS bonus and +7 ar_fit NAICS bonus are always 0. Max realistic subaward score without NAICS is ~29 (archive tier). |
 | Pipeline scheduling     | run_loop added to run_pipeline.py. PIPELINE_INTERVAL_HOURS env var controls interval (default 6h). Set to 0 for one-shot run. docker-compose restarts on crash. |
 | USASpending subawards   | Second source built, committed. connector: app/pipeline/connectors/usaspending_subawards.py. claim_supported=SUBCONTRACT_AWARD. Source seeded enabled=False — enable after UAT of 20+ leads. API filters silently ignored; $1B amount cap + year 2000-2030 date guard in Pydantic validator. No UEI/NAICS/state in API response. Noise keyword filter (_NOISE_KEYWORDS / _SIGNAL_KEYWORDS) quarantines CCDBG childcare/social-service records; annotates signal matches in payload["description_signal_keyword"]. Sort: amount desc (not id desc — id desc surfaced CCDBG batch at top, 99.5% noise). USASPENDING_SUBAWARDS_START_PAGE=500 (default) skips $1B+ corrupt rows at pages 1-499. Live test at page 500: 186/200 valid (93%), 14 quarantined. |
