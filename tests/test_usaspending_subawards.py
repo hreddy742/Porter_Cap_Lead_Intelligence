@@ -110,6 +110,7 @@ def _run_connector(
         "USASPENDING_SUBAWARDS_MAX_RETRIES": "",
         "USASPENDING_SUBAWARDS_BACKOFF_BASE_SECONDS": "",
         "USASPENDING_SUBAWARDS_BACKOFF_MAX_SECONDS": "",
+        "USASPENDING_SUBAWARDS_START_PAGE": "1",
     }
     if env:
         env_patch.update(env)
@@ -318,13 +319,14 @@ def test_page_limit_env_var_sent_in_request():
     assert sent_body["limit"] == 10
 
 
-# ─── Test 10: sort by id desc in request body ────────────────────────────────
+# ─── Test 10: sort by amount desc in request body ────────────────────────────
 
 
-def test_sort_by_id_desc_in_request_body():
+def test_sort_by_amount_desc_in_request_body():
     """
-    The connector must sort by 'id' descending — not 'action_date'.
-    action_date sort returns corrupted year-6010 dates at the top.
+    The connector must sort by 'amount' descending.
+    id desc surfaced CCDBG childcare batches (99%+ noise at the top).
+    amount desc targets the $1M-$30M manufacturing/defense/staffing window.
     """
     pages = [_mock_response([_subaward(1)], has_next=False)]
 
@@ -332,7 +334,7 @@ def test_sort_by_id_desc_in_request_body():
 
     call_kwargs = mock_client.post.call_args
     sent_body = call_kwargs.kwargs.get("json") or call_kwargs.args[1]
-    assert sent_body.get("sort") == "id", "must sort by id, not action_date"
+    assert sent_body.get("sort") == "amount", "must sort by amount, not id or action_date"
     assert sent_body.get("order") == "desc"
 
 
@@ -578,7 +580,44 @@ def test_max_pages_env_var_override_respected():
     assert connector.max_pages == 5
 
 
-# ─── Test 24: timeout env var passed to httpx.Client ─────────────────────────
+# ─── Test 24: start_page env var controls first page fetched ─────────────────
+
+
+def test_start_page_env_var_controls_first_request_page():
+    """USASPENDING_SUBAWARDS_START_PAGE=500 sends page=500 in the first POST body."""
+    pages = [_mock_response([_subaward(1)], has_next=False)]
+
+    _source_run, _session, mock_client = _run_connector(
+        responses=pages, env={"USASPENDING_SUBAWARDS_START_PAGE": "500"}
+    )
+
+    call_kwargs = mock_client.post.call_args
+    sent_body = call_kwargs.kwargs.get("json") or call_kwargs.args[1]
+    assert sent_body.get("page") == 500
+
+
+def test_start_page_default_is_500():
+    """Default start_page is 500 (skips corrupted trillion-dollar amount rows)."""
+    with patch.dict(
+        "os.environ",
+        {
+            "USASPENDING_SUBAWARDS_MAX_PAGES": "",
+            "USASPENDING_SUBAWARDS_PAGE_LIMIT": "",
+            "USASPENDING_SUBAWARDS_TIMEOUT_SECONDS": "",
+            "USASPENDING_SUBAWARDS_MAX_RETRIES": "",
+            "USASPENDING_SUBAWARDS_BACKOFF_BASE_SECONDS": "",
+            "USASPENDING_SUBAWARDS_BACKOFF_MAX_SECONDS": "",
+            "USASPENDING_SUBAWARDS_START_PAGE": "",
+        },
+    ):
+        connector = USASpendingSubawardsConnector(
+            _make_session(), _make_source_run(), _make_source()
+        )
+
+    assert connector.start_page == 500
+
+
+# ─── Test 26: timeout env var passed to httpx.Client ─────────────────────────
 
 
 def test_timeout_env_var_passed_to_client():

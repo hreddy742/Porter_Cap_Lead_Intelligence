@@ -11,9 +11,13 @@ Key differences from the prime-award connector (usaspending.py):
 
   Endpoint:      /api/v2/subawards/   (not /search/spending_by_transaction/)
   Response keys: lowercase (recipient_name, amount, action_date)
-  Sort:          "id" descending — action_date sort returns corrupted future
-                 dates (year 6010, 2202) at the top; id is monotonically
-                 increasing so id desc = most-recently reported first
+  Sort:          "amount" descending — id desc was the original sort but it
+                 surfaces the most-recently uploaded batch first, which is
+                 currently dominated by CCDBG childcare subgrants (99%+ noise).
+                 amount desc targets the $1M–$30M manufacturing/defense/staffing
+                 subcontracts in Porter's ICP. The $1B Pydantic cap silently
+                 absorbs the corrupted trillion-dollar rows at pages 1–N.
+                 action_date sort still avoided — it returns year-6010 dates.
   Filters:       NOT USED — the subawards endpoint accepts filter keys but
                  silently ignores them (verified by testing all documented
                  filter types in June 2026; revisit if USASpending fixes this)
@@ -34,6 +38,9 @@ Env vars (all optional):
   USASPENDING_SUBAWARDS_MAX_RETRIES                       (default 3)
   USASPENDING_SUBAWARDS_BACKOFF_BASE_SECONDS              (default 2.0)
   USASPENDING_SUBAWARDS_BACKOFF_MAX_SECONDS               (default 60.0)
+  USASPENDING_SUBAWARDS_START_PAGE         first page to fetch (default 500)
+    Pages 1–499 of amount desc are above the $1B cap (corrupt rows). Setting
+    500 skips straight to the $1M–$30M subcontract window.
 """
 
 from __future__ import annotations
@@ -225,6 +232,7 @@ class USASpendingSubawardsConnector:
         self.max_retries = _env_int("USASPENDING_SUBAWARDS_MAX_RETRIES", 3)
         self.backoff_base = _env_float("USASPENDING_SUBAWARDS_BACKOFF_BASE_SECONDS", 2.0)
         self.backoff_max = _env_float("USASPENDING_SUBAWARDS_BACKOFF_MAX_SECONDS", 60.0)
+        self.start_page = _env_int("USASPENDING_SUBAWARDS_START_PAGE", 500)
 
         self._log = logger.bind(
             connector="usaspending_subawards",
@@ -252,10 +260,12 @@ class USASpendingSubawardsConnector:
     # ── Private ───────────────────────────────────────────────────────────────
 
     def _fetch_all_pages(self) -> None:
-        page = 1
+        page = self.start_page
+        pages_fetched = 0
         with httpx.Client(timeout=self.timeout) as client:
             while True:
                 results, has_next = self._fetch_page(client, page)
+                pages_fetched += 1
                 self._log.info(
                     "usaspending_subawards_page_fetched",
                     page=page,
@@ -266,16 +276,24 @@ class USASpendingSubawardsConnector:
                     self._process_record(raw)
                 if not has_next:
                     break
-                if self.max_pages is not None and page >= self.max_pages:
+                if self.max_pages is not None and pages_fetched >= self.max_pages:
                     break
                 page += 1
 
     def _fetch_page(self, client: httpx.Client, page: int) -> tuple[list[dict], bool]:
+        # Sort by amount desc rather than id desc.
+        # id desc retrieves the most recently reported records first,
+        # which are currently dominated by CCDBG childcare subgrants
+        # (a large batch uploaded recently). amount desc skips that noise
+        # and surfaces the $1M-$30M manufacturing/defense/staffing
+        # subcontracts where Porter's ICP is concentrated.
+        # The $1B Pydantic cap silently absorbs the corrupted
+        # trillion-dollar rows at pages 1-N before real data appears.
         body = {
             "filters": {},
             "limit": self.page_limit,
             "page": page,
-            "sort": "id",
+            "sort": "amount",
             "order": "desc",
         }
         last_exc: Exception | None = None
