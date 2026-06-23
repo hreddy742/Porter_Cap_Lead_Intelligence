@@ -22,6 +22,7 @@ import pytest
 from app.pipeline.connectors.usaspending_subawards import (
     USASpendingSubawardsConnector,
     USASpendingSubawardsRecord,
+    _infer_naics_from_description,
 )
 
 
@@ -786,3 +787,66 @@ def test_null_description_passes_through():
 
     assert source_run.records_valid == 1
     assert source_run.quarantine_count == 0
+
+
+# ─── Test 32–37: NAICS inference from description ────────────────────────────
+
+
+def test_naics_infer_manufacturing_keyword():
+    """'manufacturing' in description → NAICS prefix '33' (AR-heavy manufacturing)."""
+    assert _infer_naics_from_description("PRECISION MANUFACTURING SERVICES") == "33"
+
+
+def test_naics_infer_pallet_keyword():
+    """'pallet' substring in description → NAICS prefix '33'."""
+    assert _infer_naics_from_description("Wooden pallets and crating supply") == "33"
+
+
+def test_naics_infer_staffing_keyword():
+    """'staffing' in description → NAICS prefix '56' (staffing/admin services)."""
+    assert _infer_naics_from_description("STAFFING AND LABOR SUPPORT CONTRACT") == "56"
+
+
+def test_naics_infer_supply_keyword():
+    """'supply' in description → NAICS prefix '42' (wholesale/distribution)."""
+    assert _infer_naics_from_description("Office supply procurement order") == "42"
+
+
+def test_naics_infer_empty_description_returns_none():
+    """Empty string description returns None — no NAICS inferred."""
+    assert _infer_naics_from_description("") is None
+
+
+def test_naics_infer_none_description_returns_none():
+    """None description returns None."""
+    assert _infer_naics_from_description(None) is None
+
+
+def test_naics_infer_unrecognized_description_returns_none():
+    """A description with no matching keywords returns None."""
+    assert _infer_naics_from_description("GENERAL ADMINISTRATIVE TASK ORDER 99") is None
+
+
+def test_naics_inferred_stored_in_payload_for_manufacturing():
+    """A manufacturing description causes naics_code='33' to appear in stored payload."""
+    mfg = {**_subaward(1), "description": "METAL FABRICATION AND MACHINING SERVICES"}
+    pages = [_mock_response([mfg], has_next=False)]
+
+    source_run, session, _client = _run_connector(responses=pages)
+
+    assert source_run.records_valid == 1
+    added = session.add.call_args[0][0]
+    assert added.payload.get("naics_code") == "33"
+
+
+def test_noise_keyword_still_quarantines_before_naics_inference():
+    """A description with a noise keyword is quarantined even if it also contains NAICS keywords.
+    Noise check runs first; naics_code must not appear in the payload."""
+    noisy_mfg = {**_subaward(1), "description": "CHILDCARE FACILITY CONSTRUCTION AND MANUFACTURING"}
+    pages = [_mock_response([noisy_mfg], has_next=False)]
+
+    source_run, session, _client = _run_connector(responses=pages)
+
+    assert source_run.quarantine_count == 1
+    assert source_run.records_valid == 0
+    session.add.assert_not_called()

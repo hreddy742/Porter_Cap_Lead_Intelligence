@@ -101,6 +101,81 @@ _SIGNAL_KEYWORDS = frozenset({
     "professional services", "consulting", "training",
 })
 
+# Keyword-to-NAICS-prefix map for description-based NAICS inference.
+# Only prefixes that earn the +15 porter_fit / +7 ar_fit AR-heavy NAICS bonus
+# in the scoring engine are included. Ordered from most specific to least.
+_DESCRIPTION_NAICS_MAP: list[tuple[frozenset[str], str]] = [
+    # Manufacturing — NAICS 31-33 (AR-heavy, +15 scorer bonus)
+    (frozenset({
+        "manufacturing", "fabricat", "assembl", "machin", "weld",
+        "cast", "forg", "mill", "pallet", "lumber", "wood product",
+        "pump", "valve", "compressor", "motor", "engine",
+        "cable assembly", "wire harness", "electronic component",
+        "circuit", "sensor", "radar", "antenna", "optical",
+        "aerospace component", "aircraft part", "hull", "armor",
+        "ammunition", "ordnance", "propellant", "explosive",
+        "metal part", "steel", "aluminum", "titanium", "composite",
+        "precision part", "machined part", "bearing", "gear",
+        "hydraulic", "pneumatic", "fastener", "fitting", "flange",
+    }), "33"),
+
+    # Wholesale / distribution — NAICS 42 (AR-heavy, +15 bonus)
+    (frozenset({
+        "supply", "supplies", "wholesale", "distribution",
+        "distributor", "reseller", "procurement", "spare part",
+        "consumable", "medical supply", "office supply",
+        "janitorial supply",
+    }), "42"),
+
+    # Staffing / admin services — NAICS 56 (AR-heavy, +15 bonus)
+    (frozenset({
+        "staffing", "temporary staff", "labor support",
+        "workforce", "personnel", "temp service",
+        "administrative support", "clerical", "data entry",
+        "custodial", "janitorial service", "grounds maintenance",
+        "base operation", "facility operation", "logistic support",
+    }), "56"),
+
+    # Professional / technical services — NAICS 54
+    (frozenset({
+        "engineering service", "technical service", "consulting",
+        "professional service", "information technology",
+        "software development", "systems integration",
+        "cybersecurity", "cloud service", "network service",
+        "architecture", "survey", "testing service",
+        "inspection service", "environmental service",
+    }), "54"),
+
+    # Equipment rental — NAICS 53
+    (frozenset({
+        "rental", "lease equipment", "equipment rental",
+        "vehicle lease", "heavy equipment",
+    }), "53"),
+
+    # Construction — NAICS 23
+    (frozenset({
+        "construction", "renovation", "installation service",
+        "demolition", "roofing", "paving", "excavat",
+        "utility installation",
+    }), "23"),
+]
+
+
+def _infer_naics_from_description(description: str | None) -> str | None:
+    """
+    Infer a NAICS prefix from subcontract description keywords.
+    Returns the first matching NAICS prefix or None if no match.
+    Matching is case-insensitive substring search.
+    """
+    if not description:
+        return None
+    desc_lower = description.lower()
+    for keywords, naics_prefix in _DESCRIPTION_NAICS_MAP:
+        for kw in keywords:
+            if kw in desc_lower:
+                return naics_prefix
+    return None
+
 
 class ConnectorError(Exception):
     """Raised when all retry attempts for a transient connector error are exhausted."""
@@ -397,6 +472,16 @@ class USASpendingSubawardsConnector:
         payload: dict = dict(raw)
         if signal_keyword is not None:
             payload["description_signal_keyword"] = signal_keyword
+
+        inferred_naics = _infer_naics_from_description(record.description)
+        if inferred_naics:
+            self._log.info(
+                "subaward_naics_inferred",
+                company=record.recipient_name,
+                naics_prefix=inferred_naics,
+                description=(record.description or "")[:80],
+            )
+            payload["naics_code"] = inferred_naics
 
         event = RawSourceEvent(
             source_id=self.source.id,

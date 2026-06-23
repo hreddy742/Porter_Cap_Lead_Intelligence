@@ -183,7 +183,7 @@ def _extract_subaward_evidence(
         "description": payload.get("description"),
         "subaward_number": payload.get("subaward_number"),
         "prime_contractor": None,
-        "naics_code": None,
+        "naics_code": payload.get("naics_code"),
         "state_code": None,
     }
 
