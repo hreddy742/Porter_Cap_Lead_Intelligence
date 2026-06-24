@@ -170,3 +170,68 @@ class TestNoWriteEndpoints:
     def test_no_post_review_decisions(self, plain_client):
         r = plain_client.post("/api/review-decisions", json={})
         assert r.status_code == 404  # route does not exist at all
+
+
+# ── signal_type field ─────────────────────────────────────────────────────────
+
+class TestSignalTypeField:
+    """signal_type appears in leads list items; None when no award signal exists."""
+
+    def test_schema_has_signal_type(self):
+        from app.api.schemas import LeadListItemSchema
+        assert "signal_type" in LeadListItemSchema.model_fields
+
+    def test_signal_type_defaults_to_none(self):
+        from app.api.schemas import LeadListItemSchema
+        item = LeadListItemSchema(
+            lead_id="00000000-0000-0000-0000-000000000001",
+            company_id="00000000-0000-0000-0000-000000000002",
+            company_name="Test Co",
+            tier="hot",
+            score=80,
+            sales_status="research",
+            primary_source="usaspending",
+            latest_signal_date=None,
+            max_award_amount=None,
+            is_new_in_run=False,
+            created_at="2026-01-01T00:00:00",
+            updated_at="2026-01-01T00:00:00",
+        )
+        assert item.signal_type is None
+
+    @pytest.mark.db
+    def test_signal_type_in_api_response_item(self, client, db_session):
+        """API returns signal_type=None for a lead that has no award signals."""
+        import uuid as uuid_mod
+        from app.db.models import Company, LeadCandidate
+
+        company = Company(
+            id=uuid_mod.uuid4(),
+            canonical_name="Signal Type Test Co",
+            normalized_name="signal type test co",
+            external_id="sigtest0001234567",
+            country="US",
+        )
+        db_session.add(company)
+        db_session.flush()
+
+        lead = LeadCandidate(
+            id=uuid_mod.uuid4(),
+            company_id=company.id,
+            status="active",
+            sales_status="research",
+        )
+        db_session.add(lead)
+        db_session.flush()
+
+        r = client.get("/api/leads")
+        assert r.status_code == 200
+        data = r.json()
+        items = data["items"]
+        assert len(items) >= 1
+        match = next(
+            (i for i in items if i["company_name"] == "Signal Type Test Co"), None
+        )
+        assert match is not None, "inserted lead not found in API response"
+        assert "signal_type" in match
+        assert match["signal_type"] is None

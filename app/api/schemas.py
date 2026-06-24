@@ -44,6 +44,7 @@ class LeadListItemSchema(BaseModel):
     score: int | None
     sales_status: str
     primary_source: str | None
+    signal_type: str | None = None
     latest_signal_date: str | None
     max_award_amount: str | None
     is_new_in_run: bool

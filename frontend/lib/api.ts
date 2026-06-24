@@ -42,6 +42,7 @@ export interface LeadListItem {
   score: number | null;
   sales_status: string;
   primary_source: string | null;
+  signal_type: string | null;
   latest_signal_date: string | null;
   max_award_amount: string | null;
   is_new_in_run: boolean;

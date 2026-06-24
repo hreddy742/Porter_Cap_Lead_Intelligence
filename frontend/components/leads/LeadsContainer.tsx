@@ -5,7 +5,7 @@ import Link from "next/link";
 import type { LeadListItem } from "@/lib/api";
 import { TierBadge } from "@/components/ui/TierBadge";
 import { StatusBadge } from "@/components/ui/StatusBadge";
-import { SourceBadge } from "@/components/ui/SourceBadge";
+import { SourceBadge, SignalTypeBadge } from "@/components/ui/SourceBadge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorState } from "@/components/ui/ErrorState";
 import { Search, X } from "lucide-react";
@@ -376,7 +376,10 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
                     </span>
                   </td>
                   <td className="px-4 py-3">
-                    <SourceBadge source={lead.primary_source} />
+                    <div className="flex flex-col gap-1">
+                      <SourceBadge source={lead.primary_source} />
+                      <SignalTypeBadge signalType={lead.signal_type} />
+                    </div>
                   </td>
                   <td className="px-4 py-3 text-[12px] text-slate-500 whitespace-nowrap">
                     {fmtDate(lead.latest_signal_date)}

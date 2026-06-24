@@ -19,6 +19,7 @@ from app.dashboard.review import (
     get_latest_run_context,
     list_leads_filtered,
 )
+from app.db.models import Signal
 from app.db.session import get_session
 
 router = APIRouter()
@@ -78,6 +79,24 @@ def list_leads(
     total = len(rows)
     page_rows = rows[offset: offset + limit]
 
+    # Batch-fetch dominant award signal type for companies on this page.
+    # Most-recent signal date wins when both CONTRACT_AWARD and SUBCONTRACT_AWARD exist.
+    dominant_signal: dict = {}
+    company_ids = [r["lead"].company_id for r in page_rows]
+    if company_ids:
+        sig_rows = (
+            db.query(Signal.company_id, Signal.signal_type, Signal.signal_date)
+            .filter(
+                Signal.company_id.in_(company_ids),
+                Signal.signal_type.in_(["CONTRACT_AWARD", "SUBCONTRACT_AWARD"]),
+            )
+            .order_by(Signal.signal_date.desc())
+            .all()
+        )
+        for sig in sig_rows:
+            if sig.company_id not in dominant_signal:
+                dominant_signal[sig.company_id] = sig.signal_type
+
     items = [
         LeadListItemSchema(
             lead_id=str(r["lead"].id),
@@ -89,6 +108,7 @@ def list_leads(
             score=r["lead"].current_score,
             sales_status=r["lead"].sales_status or "",
             primary_source=r["primary_source"],
+            signal_type=dominant_signal.get(r["lead"].company_id),
             latest_signal_date=_s(r["latest_signal_date"]),
             max_award_amount=_s(r["max_award_amount"]),
             is_new_in_run=r["is_new_in_run"],

@@ -1,3 +1,27 @@
+const SIGNAL_TYPE_CFG: Record<string, { label: string; cls: string }> = {
+  CONTRACT_AWARD: {
+    label: "Prime Contract",
+    cls: "bg-emerald-50 text-emerald-700 ring-1 ring-inset ring-emerald-600/20",
+  },
+  SUBCONTRACT_AWARD: {
+    label: "Subcontract",
+    cls: "bg-blue-50 text-blue-700 ring-1 ring-inset ring-blue-600/20",
+  },
+};
+
+export function SignalTypeBadge({ signalType }: { signalType: string | null }) {
+  const cfg = signalType ? SIGNAL_TYPE_CFG[signalType] : undefined;
+  const label = cfg?.label ?? "Unknown";
+  const cls = cfg?.cls ?? "bg-slate-100 text-slate-500 ring-1 ring-inset ring-slate-300";
+  return (
+    <span
+      className={`inline-flex items-center rounded px-2 py-0.5 text-xs font-medium ${cls}`}
+    >
+      {label}
+    </span>
+  );
+}
+
 const SOURCE_CFG: Record<string, { label: string; cls: string }> = {
   usaspending: {
     label: "USASpending",
