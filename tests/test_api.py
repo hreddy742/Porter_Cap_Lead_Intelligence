@@ -118,9 +118,46 @@ class TestLeadsList:
             assert r.status_code == 200, f"view={view} failed"
 
     def test_tier_param_accepted(self, client):
-        for tier in ("hot", "warm", "cold"):
+        for tier in ("hot", "warm", "cold", "archive"):
             r = client.get(f"/api/leads?tier={tier}")
             assert r.status_code == 200
+
+    @pytest.mark.db
+    def test_archive_tier_filter_returns_archive_leads(self, client, db_session):
+        """Archive leads appear in /api/leads?tier=archive and not in other tiers."""
+        import uuid as uuid_mod
+        from app.db.models import Company, LeadCandidate
+
+        company = Company(
+            id=uuid_mod.uuid4(),
+            canonical_name="Archive Filter Test Co",
+            normalized_name="archive filter test co",
+            external_id="archtest00123456",
+            country="US",
+        )
+        db_session.add(company)
+        db_session.flush()
+
+        lead = LeadCandidate(
+            id=uuid_mod.uuid4(),
+            company_id=company.id,
+            status="active",
+            tier="archive",
+            current_score=10,
+            sales_status="research",
+        )
+        db_session.add(lead)
+        db_session.flush()
+
+        r = client.get("/api/leads?tier=archive")
+        assert r.status_code == 200
+        data = r.json()
+        names = [i["company_name"] for i in data["items"]]
+        assert "Archive Filter Test Co" in names, "archive lead missing from tier=archive response"
+
+        r_hot = client.get("/api/leads?tier=hot")
+        hot_names = [i["company_name"] for i in r_hot.json()["items"]]
+        assert "Archive Filter Test Co" not in hot_names
 
     def test_sort_param_accepted(self, client):
         for sort in ("score_desc", "newest_first", "latest_updated"):
