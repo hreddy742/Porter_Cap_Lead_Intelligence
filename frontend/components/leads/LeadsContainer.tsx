@@ -110,6 +110,7 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
   const [tierFilter, setTierFilter] = useState("");
   const [statusFilter, setStatusFilter] = useState("");
   const [sourceFilter, setSourceFilter] = useState("");
+  const [includeExcluded, setIncludeExcluded] = useState(false);
 
   const statuses = useMemo(() => getUniqueStatuses(leads), [leads]);
   const sources = useMemo(() => getUniqueSources(leads), [leads]);
@@ -131,6 +132,7 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
 
   const filtered = useMemo(() => {
     let result = tabLeads;
+    if (!includeExcluded) result = result.filter((l) => !l.sector_excluded);
     if (search.trim()) {
       const q = search.toLowerCase();
       result = result.filter((l) =>
@@ -143,7 +145,7 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
     if (sourceFilter)
       result = result.filter((l) => l.primary_source === sourceFilter);
     return result;
-  }, [tabLeads, search, tierFilter, statusFilter, sourceFilter]);
+  }, [tabLeads, search, tierFilter, statusFilter, sourceFilter, includeExcluded]);
 
   const hasActiveFilters = search || tierFilter || statusFilter || sourceFilter;
 
@@ -261,6 +263,18 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
           </button>
         )}
 
+        <label className="flex items-center gap-1.5 cursor-pointer ml-2 select-none">
+          <input
+            type="checkbox"
+            checked={includeExcluded}
+            onChange={(e) => setIncludeExcluded(e.target.checked)}
+            className="w-3.5 h-3.5 rounded border-slate-300 text-amber-500 focus:ring-amber-400"
+          />
+          <span className="text-[12px] text-slate-400 whitespace-nowrap">
+            Include leads outside Porter ICP sectors
+          </span>
+        </label>
+
         <p className="ml-auto text-[11px] text-slate-400 tabular-nums whitespace-nowrap">
           {filtered.length.toLocaleString()} of {total.toLocaleString()} leads
         </p>
@@ -355,8 +369,18 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
                       href={`/leads/${lead.lead_id}`}
                       className="block min-w-0"
                     >
-                      <span className="text-[13px] font-medium text-slate-900 group-hover:text-blue-600 transition-colors leading-snug block">
-                        {lead.company_name}
+                      <span className="inline-flex items-center gap-1.5 leading-snug">
+                        <span className="text-[13px] font-medium text-slate-900 group-hover:text-blue-600 transition-colors">
+                          {lead.company_name}
+                        </span>
+                        {includeExcluded && lead.sector_excluded && (
+                          <span
+                            title={lead.sector_excluded_reason ?? "Outside Porter ICP sector"}
+                            className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20 whitespace-nowrap"
+                          >
+                            ⚠ Outside ICP
+                          </span>
+                        )}
                       </span>
                       <span className="block text-[10px] font-mono text-slate-400 mt-0.5">
                         {lead.lead_id.substring(0, 8)}&hellip;

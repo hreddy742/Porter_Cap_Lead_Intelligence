@@ -25,7 +25,7 @@ from app.db.models import (
     Signal,
     ScoringConfig,
 )
-from app.processing.gates import evaluate_mandatory_gates
+from app.processing.gates import evaluate_mandatory_gates, flag_excluded_sector
 
 
 # ─── Exceptions ───────────────────────────────────────────────────────────────
@@ -336,6 +336,10 @@ def score_company(company_id: UUID, db: Session) -> dict:
         candidate.current_score = total_score
         candidate.gate_result = "passed"
         candidate.ar_fit_confidence = "low"
+
+    # Soft-flag leads whose NAICS falls in a Porter ICP excluded sector.
+    # Does not block scoring — lead is stored and scored normally.
+    flag_excluded_sector(company, candidate, db)
 
     # ── Step 6: persist lead_scores ───────────────────────────────────────────
     lead_score = LeadScore(

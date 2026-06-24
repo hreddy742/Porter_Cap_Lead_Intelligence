@@ -30,7 +30,7 @@ from app.db.models import (
     Signal,
     SuppressionList,
 )
-from app.processing.gates import _parse_env_decimal, evaluate_mandatory_gates
+from app.processing.gates import _parse_env_decimal, evaluate_mandatory_gates, flag_excluded_sector
 
 
 # ─── Shared mock builders ─────────────────────────────────────────────────────
@@ -651,3 +651,100 @@ def test_parse_env_decimal_invalid_raises():
     with patch.dict("os.environ", {"_GATE_TEST_VAR_XYZ": "not_a_number"}):
         with pytest.raises(ValueError, match="_GATE_TEST_VAR_XYZ"):
             _parse_env_decimal("_GATE_TEST_VAR_XYZ", Decimal("10000"))
+
+
+# ─── flag_excluded_sector tests ───────────────────────────────────────────────
+
+
+def _make_lead_candidate() -> MagicMock:
+    lc = MagicMock(spec=LeadCandidate)
+    lc.id = uuid.uuid4()
+    lc.sector_excluded = False
+    lc.sector_excluded_reason = None
+    return lc
+
+
+def _make_db_for_flag() -> MagicMock:
+    db = MagicMock()
+    db.flush.return_value = None
+    return db
+
+
+def test_flag_excluded_sector_healthcare_naics_flagged():
+    """Company with NAICS 621100 (Health Care) → sector_excluded=True."""
+    company = _make_company(naics_code="621100")
+    lead = _make_lead_candidate()
+    db = _make_db_for_flag()
+
+    result = flag_excluded_sector(company, lead, db)
+
+    assert result is True
+    assert lead.sector_excluded is True
+    assert lead.sector_excluded_reason is not None
+    assert "62" in lead.sector_excluded_reason
+    db.flush.assert_called_once()
+
+
+def test_flag_excluded_sector_agriculture_naics_flagged():
+    """Company with NAICS 111110 (Agriculture) → sector_excluded=True."""
+    company = _make_company(naics_code="111110")
+    lead = _make_lead_candidate()
+    db = _make_db_for_flag()
+
+    result = flag_excluded_sector(company, lead, db)
+
+    assert result is True
+    assert lead.sector_excluded is True
+    assert "11" in lead.sector_excluded_reason
+
+
+def test_flag_excluded_sector_public_admin_naics_flagged():
+    """Company with NAICS 921100 (Public Administration) → sector_excluded=True."""
+    company = _make_company(naics_code="921100")
+    lead = _make_lead_candidate()
+    db = _make_db_for_flag()
+
+    result = flag_excluded_sector(company, lead, db)
+
+    assert result is True
+    assert lead.sector_excluded is True
+    assert "92" in lead.sector_excluded_reason
+
+
+def test_flag_excluded_sector_finance_naics_flagged():
+    """Company with NAICS 521000 (Finance) → sector_excluded=True."""
+    company = _make_company(naics_code="521000")
+    lead = _make_lead_candidate()
+    db = _make_db_for_flag()
+
+    result = flag_excluded_sector(company, lead, db)
+
+    assert result is True
+    assert lead.sector_excluded is True
+    assert "52" in lead.sector_excluded_reason
+
+
+def test_flag_excluded_sector_professional_services_not_flagged():
+    """Company with NAICS 541300 (Professional Services) → sector_excluded=False."""
+    company = _make_company(naics_code="541300")
+    lead = _make_lead_candidate()
+    db = _make_db_for_flag()
+
+    result = flag_excluded_sector(company, lead, db)
+
+    assert result is False
+    assert lead.sector_excluded is False
+    db.flush.assert_not_called()
+
+
+def test_flag_excluded_sector_none_naics_not_flagged():
+    """Company with naics_code=None → sector_excluded unchanged, returns False."""
+    company = _make_company(naics_code=None)
+    lead = _make_lead_candidate()
+    db = _make_db_for_flag()
+
+    result = flag_excluded_sector(company, lead, db)
+
+    assert result is False
+    assert lead.sector_excluded is False
+    db.flush.assert_not_called()

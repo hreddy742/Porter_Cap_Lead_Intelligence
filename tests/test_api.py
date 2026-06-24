@@ -272,3 +272,138 @@ class TestSignalTypeField:
         assert match is not None, "inserted lead not found in API response"
         assert "signal_type" in match
         assert match["signal_type"] is None
+
+
+# ── sector_excluded filter ────────────────────────────────────────────────────
+
+
+class TestSectorExcludedField:
+    """sector_excluded fields present in response; default view hides excluded leads."""
+
+    def test_schema_has_sector_excluded(self):
+        from app.api.schemas import LeadListItemSchema
+        assert "sector_excluded" in LeadListItemSchema.model_fields
+
+    def test_schema_has_sector_excluded_reason(self):
+        from app.api.schemas import LeadListItemSchema
+        assert "sector_excluded_reason" in LeadListItemSchema.model_fields
+
+    def test_sector_excluded_defaults_to_false(self):
+        from app.api.schemas import LeadListItemSchema
+        item = LeadListItemSchema(
+            lead_id="00000000-0000-0000-0000-000000000001",
+            company_id="00000000-0000-0000-0000-000000000002",
+            company_name="Test Co",
+            tier="hot",
+            score=80,
+            sales_status="research",
+            primary_source="usaspending",
+            latest_signal_date=None,
+            max_award_amount=None,
+            is_new_in_run=False,
+            created_at="2026-01-01T00:00:00",
+            updated_at="2026-01-01T00:00:00",
+        )
+        assert item.sector_excluded is False
+        assert item.sector_excluded_reason is None
+
+    @pytest.mark.db
+    def test_default_view_excludes_sector_excluded_leads(self, client, db_session):
+        """GET /api/leads (default) does not return leads with sector_excluded=True."""
+        import uuid as uuid_mod
+        from app.db.models import Company, LeadCandidate
+
+        company = Company(
+            id=uuid_mod.uuid4(),
+            canonical_name="Healthcare Sector Co",
+            normalized_name="healthcare sector co",
+            external_id="hcsector0012345",
+            country="US",
+            naics_code="621100",
+        )
+        db_session.add(company)
+        db_session.flush()
+
+        lead = LeadCandidate(
+            id=uuid_mod.uuid4(),
+            company_id=company.id,
+            status="active",
+            sales_status="research",
+            sector_excluded=True,
+            sector_excluded_reason="NAICS 621100 is in excluded sector 62",
+        )
+        db_session.add(lead)
+        db_session.flush()
+
+        r = client.get("/api/leads")
+        assert r.status_code == 200
+        names = [i["company_name"] for i in r.json()["items"]]
+        assert "Healthcare Sector Co" not in names, "excluded lead should be hidden by default"
+
+    @pytest.mark.db
+    def test_include_excluded_true_returns_all_leads(self, client, db_session):
+        """GET /api/leads?include_excluded=true returns leads with sector_excluded=True."""
+        import uuid as uuid_mod
+        from app.db.models import Company, LeadCandidate
+
+        company = Company(
+            id=uuid_mod.uuid4(),
+            canonical_name="Construction Sector Co",
+            normalized_name="construction sector co",
+            external_id="constsect001234",
+            country="US",
+            naics_code="236110",
+        )
+        db_session.add(company)
+        db_session.flush()
+
+        lead = LeadCandidate(
+            id=uuid_mod.uuid4(),
+            company_id=company.id,
+            status="active",
+            sales_status="research",
+            sector_excluded=True,
+            sector_excluded_reason="NAICS 236110 is in excluded sector 23",
+        )
+        db_session.add(lead)
+        db_session.flush()
+
+        r = client.get("/api/leads?include_excluded=true")
+        assert r.status_code == 200
+        names = [i["company_name"] for i in r.json()["items"]]
+        assert "Construction Sector Co" in names, "excluded lead should appear when toggle is on"
+
+    @pytest.mark.db
+    def test_sector_excluded_field_present_in_response(self, client, db_session):
+        """Each lead item in the API response includes sector_excluded and sector_excluded_reason."""
+        import uuid as uuid_mod
+        from app.db.models import Company, LeadCandidate
+
+        company = Company(
+            id=uuid_mod.uuid4(),
+            canonical_name="Field Check Co",
+            normalized_name="field check co",
+            external_id="fieldcheck01234",
+            country="US",
+        )
+        db_session.add(company)
+        db_session.flush()
+
+        lead = LeadCandidate(
+            id=uuid_mod.uuid4(),
+            company_id=company.id,
+            status="active",
+            sales_status="research",
+        )
+        db_session.add(lead)
+        db_session.flush()
+
+        r = client.get("/api/leads")
+        assert r.status_code == 200
+        items = r.json()["items"]
+        match = next((i for i in items if i["company_name"] == "Field Check Co"), None)
+        assert match is not None
+        assert "sector_excluded" in match
+        assert "sector_excluded_reason" in match
+        assert match["sector_excluded"] is False
+        assert match["sector_excluded_reason"] is None

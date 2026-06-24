@@ -17,6 +17,7 @@ export default async function LeadsPage({
   const params: Record<string, string> = {
     limit: "2000",
     sort_by: "score_desc",
+    include_excluded: "true",
   };
   if (tier) params.tier = tier;
   if (status) params.sales_status = status;

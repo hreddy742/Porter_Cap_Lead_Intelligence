@@ -48,6 +48,8 @@ export interface LeadListItem {
   is_new_in_run: boolean;
   created_at: string;
   updated_at: string;
+  sector_excluded: boolean;
+  sector_excluded_reason: string | null;
 }
 
 export interface LeadsListResponse {

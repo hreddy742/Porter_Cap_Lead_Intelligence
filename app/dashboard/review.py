@@ -438,6 +438,7 @@ def list_leads_filtered(
     date_to: date | None = None,
     sort_by: str = "score_desc",
     latest_run_started_at: datetime | None = None,
+    include_excluded: bool = False,
 ) -> list[dict]:
     """Enhanced lead list with view selector, filters, and sorting.
 
@@ -468,18 +469,14 @@ def list_leads_filtered(
                              (approximate: lead_candidates has no first_seen_pipeline_run_id
                               or last_touched_pipeline_run_id FK, so created_at is used as proxy)
     """
-    # Archive-tier leads have status='archived' (set by the pipeline after scoring).
-    # All other tiers only contain active leads, so keep the active-only guard there.
-    if tier == "archive":
-        status_filter = LeadCandidate.status.in_(["active", "archived"])
-    else:
-        status_filter = LeadCandidate.status == "active"
-
+    # status='archived' is only ever set on archive-tier leads by the pipeline.
+    # Always include both so the full-fetch (no tier param) returns archive leads
+    # for client-side filtering, and so tier=archive API calls return all 9.
     stmt = (
         select(LeadCandidate)
         .options(joinedload(LeadCandidate.company))
         .join(Company, LeadCandidate.company_id == Company.id)
-        .where(status_filter)
+        .where(LeadCandidate.status.in_(["active", "archived"]))
         .where(Company.deleted_at.is_(None))
     )
 
@@ -531,6 +528,12 @@ def list_leads_filtered(
             .where(EvidenceItem.company_id.isnot(None))
         )
         stmt = stmt.where(LeadCandidate.company_id.in_(url_subq))
+
+    if not include_excluded:
+        stmt = stmt.where(
+            (LeadCandidate.sector_excluded == False)  # noqa: E712
+            | LeadCandidate.sector_excluded.is_(None)
+        )
 
     # ── SQL-level sorting (for non-signal sorts) ──────────────────────────────
     if sort_by == "newest_first":

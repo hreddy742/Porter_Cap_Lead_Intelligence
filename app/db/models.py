@@ -383,6 +383,8 @@ class LeadCandidate(Base):
     risk_level = Column(String(10))
     ar_fit_confidence = Column(String(10), default="low")
     why_now_summary = Column(Text)
+    sector_excluded = Column(Boolean, nullable=False, server_default=text("false"))
+    sector_excluded_reason = Column(String(200), nullable=True)
     deleted_at = Column(DateTime(timezone=True))  # soft delete
     created_at = Column(DateTime(timezone=True), nullable=False, default=utcnow)
     updated_at = Column(DateTime(timezone=True), nullable=False, default=utcnow, onupdate=utcnow)

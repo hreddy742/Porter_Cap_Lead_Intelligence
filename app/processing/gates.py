@@ -15,13 +15,32 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from uuid import UUID
 
+import structlog
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db.models import Company, EvidenceItem, LeadCandidate, Signal
 from app.processing.suppression import check_suppression
 
-_EXCLUDED_NAICS_PREFIXES = ("52", "61", "92")
+logger = structlog.get_logger(__name__)
+
+# Prefixes used by the hard-block gate (Gate 4 — excluded_industry).
+_HARD_BLOCK_NAICS_PREFIXES = ("52", "61", "92")
+
+# Prefixes for the soft-flag (Phase 2B ICP policy, confirmed by John Cox Miller June 24 2026).
+# Leads in these sectors are scored and stored normally but hidden from sales by default.
+_EXCLUDED_NAICS_PREFIXES: frozenset[str] = frozenset({
+    "11",  # Agriculture
+    "22",  # Utilities
+    "23",  # Construction
+    "52",  # Finance and Insurance
+    "61",  # Educational Services
+    "62",  # Health Care and Social Assistance
+    "71",  # Arts, Entertainment, Recreation
+    "92",  # Public Administration
+    # Source: John Cox Miller, Porter Capital, June 24 2026
+})
+
 _EXCLUDED_INDUSTRY_KEYWORDS = frozenset({"finance", "bank", "lender", "education", "government"})
 _SOFT_BLOCK_ROUTES = frozenset({
     "account_review",
@@ -75,7 +94,7 @@ def _gated(gate_reason: str, route: str) -> dict:
 def _is_excluded_industry(company: Company) -> bool:
     naics = company.naics_code
     if naics:
-        for prefix in _EXCLUDED_NAICS_PREFIXES:
+        for prefix in _HARD_BLOCK_NAICS_PREFIXES:
             if str(naics).startswith(prefix):
                 return True
     industry = (company.industry or "").lower()
@@ -213,3 +232,36 @@ def evaluate_mandatory_gates(company_id: UUID, db: Session) -> dict:
         "should_score": True,
         "suppression": suppression,
     }
+
+
+def flag_excluded_sector(
+    company: Company,
+    lead_candidate: LeadCandidate,
+    db: Session,
+) -> bool:
+    """
+    Soft-flags a lead if its NAICS falls in an excluded sector per Porter ICP policy.
+
+    Does NOT block the lead. Lead still gets scored and stored normally.
+    Returns True if flagged, False if not.
+    Only flags if company.naics_code is not None.
+    """
+    if not company.naics_code:
+        return False
+    for prefix in _EXCLUDED_NAICS_PREFIXES:
+        if company.naics_code.startswith(prefix):
+            lead_candidate.sector_excluded = True
+            lead_candidate.sector_excluded_reason = (
+                f"NAICS {company.naics_code} is in excluded "
+                f"sector {prefix} per Porter ICP policy "
+                f"confirmed by John Cox Miller June 24 2026"
+            )
+            db.flush()
+            logger.info(
+                "lead_sector_excluded_flagged",
+                company=company.canonical_name,
+                naics=company.naics_code,
+                prefix=prefix,
+            )
+            return True
+    return False

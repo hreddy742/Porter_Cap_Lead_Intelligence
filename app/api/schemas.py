@@ -50,6 +50,8 @@ class LeadListItemSchema(BaseModel):
     is_new_in_run: bool
     created_at: str
     updated_at: str
+    sector_excluded: bool = False
+    sector_excluded_reason: str | None = None
 
 
 class LeadsListResponse(BaseModel):

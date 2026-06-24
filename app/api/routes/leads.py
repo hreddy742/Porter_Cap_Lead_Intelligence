@@ -50,6 +50,7 @@ def list_leads(
     sort_by: str = "score_desc",
     limit: int = 50,
     offset: int = 0,
+    include_excluded: bool = False,
     db: Session = Depends(get_session),
 ) -> LeadsListResponse:
     parsed_source_id: UUID | None = None
@@ -74,6 +75,7 @@ def list_leads(
         has_evidence_url=has_evidence_url,
         sort_by=sort_by,
         latest_run_started_at=latest_run_started_at,
+        include_excluded=include_excluded,
     )
 
     total = len(rows)
@@ -114,6 +116,8 @@ def list_leads(
             is_new_in_run=r["is_new_in_run"],
             created_at=str(r["lead"].created_at),
             updated_at=str(r["lead"].updated_at),
+            sector_excluded=bool(r["lead"].sector_excluded),
+            sector_excluded_reason=r["lead"].sector_excluded_reason,
         )
         for r in page_rows
     ]
