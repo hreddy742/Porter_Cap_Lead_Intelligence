@@ -86,6 +86,7 @@ _NOISE_KEYWORDS = frozenset({
     "substance abuse", "mental health counseling", "drug treatment",
     "domestic violence", "senior center", "adult day care",
     "disability services", "special education",
+    "domestic awardees", "undisclosed",
 })
 
 # Records matching a signal keyword are annotated in payload["description_signal_keyword"].
@@ -225,7 +226,10 @@ class USASpendingSubawardsRecord(BaseModel):
     def validate_recipient_name(cls, v: object) -> str:
         if not isinstance(v, str) or not v.strip():
             raise ValueError("recipient_name must be a non-empty string")
-        return v.strip()
+        stripped = v.strip()
+        if any(kw in stripped.lower() for kw in {"domestic awardees", "undisclosed"}):
+            raise ValueError(f"placeholder recipient name: {stripped}")
+        return stripped
 
     @field_validator("award_amount", mode="before")
     @classmethod

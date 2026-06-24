@@ -149,7 +149,10 @@ class USASpendingRecord(BaseModel):
     def validate_recipient_name(cls, v: object) -> str:
         if not isinstance(v, str) or not v.strip():
             raise ValueError("recipient_name must be a non-empty string")
-        return v.strip()
+        stripped = v.strip()
+        if any(kw in stripped.lower() for kw in {"domestic awardees", "undisclosed"}):
+            raise ValueError(f"placeholder recipient name: {stripped}")
+        return stripped
 
     @field_validator("award_amount", mode="before")
     @classmethod
