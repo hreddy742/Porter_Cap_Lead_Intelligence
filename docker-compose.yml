@@ -20,16 +20,22 @@ services:
   app:
     build: .
     env_file: .env
+    environment:
+      DATABASE_URL: postgresql://porter:localdev@db:5432/porter_leads
+      USASPENDING_MAX_PAGES: "10"
     depends_on:
       db:
         condition: service_healthy
     volumes:
       - .:/app           # mount source for development
     command: python -m scripts.run_pipeline
+    restart: unless-stopped
 
   dashboard:
     build: .
     env_file: .env
+    environment:
+      DATABASE_URL: postgresql://porter:localdev@db:5432/porter_leads
     depends_on:
       db:
         condition: service_healthy
@@ -38,6 +44,20 @@ services:
     volumes:
       - .:/app
     command: streamlit run app/dashboard/app.py --server.port 8501 --server.address 0.0.0.0
+
+  api:
+    build: .
+    env_file: .env
+    environment:
+      DATABASE_URL: postgresql://porter:localdev@db:5432/porter_leads
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      - "8000:8000"      # FastAPI
+    volumes:
+      - .:/app
+    command: uvicorn app.api.main:app --host 0.0.0.0 --port 8000 --reload
 
 volumes:
   postgres_data:
@@ -48,3 +68,8 @@ volumes:
 #   Run pipeline manually:           docker compose run --rm app python -m scripts.run_pipeline
 #   Run migrations:                  docker compose run --rm app alembic upgrade head
 #   Run tests:                       docker compose run --rm app pytest
+#
+# Key env vars (set in .env — see .env.example):
+#   USASPENDING_MAX_PAGES=200  — pages fetched per run (100 rec/page).
+#     Controlled cap to prevent server-side disconnects on long pulls.
+#     Does not mean one run covers the full USASpending corpus.

@@ -39,7 +39,14 @@ def db_engine(postgres_container):
 
 @pytest.fixture(scope="session")
 def db_with_schema(db_engine):
-    """Run all migrations against the test DB; yield engine with schema applied."""
+    """Run all migrations against the test DB; yield engine with schema applied.
+
+    Defensively downgrades to base before upgrading to head because
+    test_migration_round_trip operates on the same shared postgres_container
+    (upgrade→downgrade→upgrade) and can leave the DB in any state depending
+    on test ordering.  Starting from a forced base→head guarantees schema tests
+    always see a fully-migrated database regardless of prior state.
+    """
     from alembic import command
     from alembic.config import Config
 
@@ -48,6 +55,8 @@ def db_with_schema(db_engine):
         "sqlalchemy.url",
         db_engine.url.render_as_string(hide_password=False),
     )
+    # Always reset to a known-clean baseline before schema tests rely on tables.
+    command.downgrade(alembic_cfg, "base")
     command.upgrade(alembic_cfg, "head")
 
     yield db_engine

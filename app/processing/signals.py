@@ -29,6 +29,8 @@ from app.db.models import EvidenceItem, Signal
 logger = structlog.get_logger(__name__)
 
 _CLAIM_CONTRACT_AWARD = "CONTRACT_AWARD"
+_CLAIM_SUBCONTRACT_AWARD = "SUBCONTRACT_AWARD"
+_HANDLED_CLAIMS = frozenset({_CLAIM_CONTRACT_AWARD, _CLAIM_SUBCONTRACT_AWARD})
 
 
 def classify_signal_strength(award_amount: Decimal | float | None) -> str:
@@ -93,7 +95,7 @@ def detect_signals_for_evidence(evidence_id: UUID, db: Session) -> list[Signal]:
         log.warning("signal_skipped_company_id_null")
         return []
 
-    if evidence.claim_supported != _CLAIM_CONTRACT_AWARD:
+    if evidence.claim_supported not in _HANDLED_CLAIMS:
         log.warning(
             "signal_skipped_wrong_claim",
             claim_supported=evidence.claim_supported,
@@ -120,7 +122,7 @@ def detect_signals_for_evidence(evidence_id: UUID, db: Session) -> list[Signal]:
         company_id=evidence.company_id,
         source_id=evidence.source_id,
         evidence_id=evidence_id,
-        signal_type=_CLAIM_CONTRACT_AWARD,
+        signal_type=evidence.claim_supported,
         signal_date=signal_date,
         signal_strength=strength,
         freshness_score=evidence.freshness_score,

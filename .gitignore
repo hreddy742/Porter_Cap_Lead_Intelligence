@@ -1,5 +1,6 @@
 # Secrets — never commit
 .env
+.env.staging
 *.env.local
 
 # Python
@@ -44,3 +45,9 @@ logs/
 
 # Exports — keep directory tracked, ignore generated CSVs
 exports/*.csv
+
+# Backups — keep directory tracked, ignore generated SQL dumps
+backups/*.sql
+
+# Runtime output artifacts
+outputs/

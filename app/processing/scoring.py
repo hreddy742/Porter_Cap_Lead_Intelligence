@@ -53,14 +53,15 @@ class NoActiveScoringConfigError(Exception):
 # Companies in these industries commonly need A/R financing.
 _AR_HEAVY_NAICS = ("54", "56", "33", "48", "23", "62")
 
-# Signal type written by detect_signals_for_evidence (must match exactly).
-_CONTRACT_AWARD = "CONTRACT_AWARD"
+# Signal types that count as contract award evidence for scoring.
+# SUBCONTRACT_AWARD is emitted by the usaspending_subawards connector.
+_AWARD_SIGNAL_TYPES = frozenset({"CONTRACT_AWARD", "SUBCONTRACT_AWARD"})
 
 # Phase 1 cap for A/R Financing Fit component.
 _AR_FIT_PHASE1_CAP = 10
 
 # Tier thresholds (inclusive lower bound).
-_TIER_HOT = 75
+_TIER_HOT = 70
 _TIER_WARM = 55
 _TIER_COLD = 35
 
@@ -175,7 +176,7 @@ def score_company(company_id: UUID, db: Session) -> dict:
     )
 
     all_evidence_ids: list[UUID] = [e.id for e in evidence_items]
-    contract_signals = [s for s in signals if s.signal_type == _CONTRACT_AWARD]
+    contract_signals = [s for s in signals if s.signal_type in _AWARD_SIGNAL_TYPES]
     award_signals = [s for s in signals if s.award_amount is not None]
 
     # Accumulate all cited UUIDs (as UUID objects) across all components.

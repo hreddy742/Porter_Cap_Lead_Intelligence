@@ -16,7 +16,9 @@ check_suppression internally; both must return the same company.
 from __future__ import annotations
 
 import uuid
-from unittest.mock import MagicMock
+from datetime import date, timedelta
+from decimal import Decimal
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -28,7 +30,7 @@ from app.db.models import (
     Signal,
     SuppressionList,
 )
-from app.processing.gates import evaluate_mandatory_gates
+from app.processing.gates import _parse_env_decimal, evaluate_mandatory_gates
 
 
 # ─── Shared mock builders ─────────────────────────────────────────────────────
@@ -56,9 +58,15 @@ def _make_evidence() -> MagicMock:
     return MagicMock(spec=EvidenceItem)
 
 
-def _make_signal(freshness_score: float) -> MagicMock:
+def _make_signal(
+    freshness_score: float,
+    award_amount=None,
+    signal_date=None,
+) -> MagicMock:
     s = MagicMock(spec=Signal)
     s.freshness_score = freshness_score
+    s.award_amount = award_amount
+    s.signal_date = signal_date
     return s
 
 
@@ -143,7 +151,9 @@ def _make_session(
 # ─── Convenience: fresh signal + evidence (pass the first two gates) ──────────
 
 _EVIDENCE = [_make_evidence()]
-_FRESH_SIGNAL = [_make_signal(0.5)]
+# Award amount qualifies (> $10K, within 90 days) so Gate 10 does not fire
+# for tests that rely on _FRESH_SIGNAL and reach the final gate.
+_FRESH_SIGNAL = [_make_signal(0.5, award_amount=Decimal("50000"), signal_date=date.today())]
 _UEI = "TESTCOMPANY_UEI_001"
 
 
@@ -455,3 +465,189 @@ def test_gate_order_no_evidence_fires_before_no_signal():
         "Gate 1 (no_evidence) must fire before Gate 2 (no_signal)"
     )
     assert result["gate_reason"] != "no_signal"
+
+
+# ─── Gate 10 helpers ─────────────────────────────────────────────────────────
+
+
+def _days_ago(n: int) -> date:
+    return date.today() - timedelta(days=n)
+
+
+def _make_gate10_db(signals_list: list):
+    """Return (company, db) with gates 1-9 all passing; Gate 10 depends on signals_list."""
+    company = _make_company()
+    db = _make_session(
+        company=company,
+        evidence_items=_EVIDENCE,
+        signals=signals_list,
+        identifiers=[],
+        suppression_entries=[],
+        active_leads=[],
+    )
+    return company, db
+
+
+# ─── Gate 10: award amount quality gate ──────────────────────────────────────
+
+
+def test_negative_award_gated_as_too_small():
+    """A single negative award provides no qualification — company is gated."""
+    sig = _make_signal(0.5, award_amount=Decimal("-500"), signal_date=date.today())
+    company, db = _make_gate10_db([sig])
+
+    result = evaluate_mandatory_gates(company.id, db)
+
+    assert result["passed"] is False
+    assert result["gate_reason"] == "award_amount_too_small"
+    assert result["route"] == "archive"
+    assert result["should_score"] is False
+
+
+def test_zero_award_gated_as_too_small():
+    """A single zero award provides no qualification — company is gated."""
+    sig = _make_signal(0.5, award_amount=Decimal("0"), signal_date=date.today())
+    company, db = _make_gate10_db([sig])
+
+    result = evaluate_mandatory_gates(company.id, db)
+
+    assert result["passed"] is False
+    assert result["gate_reason"] == "award_amount_too_small"
+    assert result["route"] == "archive"
+
+
+def test_single_tiny_award_below_threshold_gated():
+    """$50.50 single award — both single and 90-day thresholds fail — gated."""
+    sig = _make_signal(0.5, award_amount=Decimal("50.50"), signal_date=date.today())
+    company, db = _make_gate10_db([sig])
+
+    result = evaluate_mandatory_gates(company.id, db)
+
+    assert result["passed"] is False
+    assert result["gate_reason"] == "award_amount_too_small"
+
+
+def test_multiple_small_awards_totaling_above_threshold_pass():
+    """Ten × $1,500 within 90 days totals $15,000 — 90-day threshold met — not gated."""
+    sigs = [
+        _make_signal(0.5, award_amount=Decimal("1500"), signal_date=date.today())
+        for _ in range(10)
+    ]
+    company, db = _make_gate10_db(sigs)
+
+    result = evaluate_mandatory_gates(company.id, db)
+
+    assert result["passed"] is True
+    assert result["route"] == "score"
+
+
+def test_single_award_above_threshold_passes():
+    """One $12,000 award exceeds the single-award threshold — not gated."""
+    sig = _make_signal(0.5, award_amount=Decimal("12000"), signal_date=date.today())
+    company, db = _make_gate10_db([sig])
+
+    result = evaluate_mandatory_gates(company.id, db)
+
+    assert result["passed"] is True
+    assert result["route"] == "score"
+
+
+def test_boundary_single_9999_99_gated():
+    """$9,999.99 single award with no other awards — both thresholds fail — gated."""
+    sig = _make_signal(0.5, award_amount=Decimal("9999.99"), signal_date=date.today())
+    company, db = _make_gate10_db([sig])
+
+    result = evaluate_mandatory_gates(company.id, db)
+
+    assert result["passed"] is False
+    assert result["gate_reason"] == "award_amount_too_small"
+
+
+def test_boundary_single_10000_passes():
+    """$10,000 exactly meets the single-award threshold — passes."""
+    sig = _make_signal(0.5, award_amount=Decimal("10000"), signal_date=date.today())
+    company, db = _make_gate10_db([sig])
+
+    result = evaluate_mandatory_gates(company.id, db)
+
+    assert result["passed"] is True
+
+
+def test_boundary_90d_aggregate_below_threshold_gated():
+    """Ten × $999.99 in 90 days = $9,999.90 — below 90-day threshold, no single qualifier — gated."""
+    sigs = [
+        _make_signal(0.5, award_amount=Decimal("999.99"), signal_date=date.today())
+        for _ in range(10)
+    ]
+    company, db = _make_gate10_db(sigs)
+
+    result = evaluate_mandatory_gates(company.id, db)
+
+    assert result["passed"] is False
+    assert result["gate_reason"] == "award_amount_too_small"
+
+
+def test_boundary_90d_aggregate_10000_passes():
+    """Ten × $1,000 in 90 days = $10,000 — meets the 90-day threshold — passes."""
+    sigs = [
+        _make_signal(0.5, award_amount=Decimal("1000"), signal_date=date.today())
+        for _ in range(10)
+    ]
+    company, db = _make_gate10_db(sigs)
+
+    result = evaluate_mandatory_gates(company.id, db)
+
+    assert result["passed"] is True
+
+
+def test_old_awards_excluded_from_90d_window():
+    """Many small awards older than 90 days — excluded from 90-day total.
+    Without a qualifying single award, the company is gated."""
+    sigs = [
+        _make_signal(0.5, award_amount=Decimal("1500"), signal_date=_days_ago(91))
+        for _ in range(20)
+    ]
+    company, db = _make_gate10_db(sigs)
+
+    result = evaluate_mandatory_gates(company.id, db)
+
+    assert result["passed"] is False
+    assert result["gate_reason"] == "award_amount_too_small"
+
+
+def test_mixed_negative_zero_positive_at_threshold_passes():
+    """Negative + zero + two $5,000 positives — only positives count; 90-day total $10,000 — passes."""
+    sigs = [
+        _make_signal(0.5, award_amount=Decimal("-1000"), signal_date=date.today()),
+        _make_signal(0.5, award_amount=Decimal("0"),     signal_date=date.today()),
+        _make_signal(0.5, award_amount=Decimal("5000"),  signal_date=date.today()),
+        _make_signal(0.5, award_amount=Decimal("5000"),  signal_date=date.today()),
+    ]
+    company, db = _make_gate10_db(sigs)
+
+    result = evaluate_mandatory_gates(company.id, db)
+
+    assert result["passed"] is True
+
+
+# ─── _parse_env_decimal unit tests ───────────────────────────────────────────
+
+
+def test_parse_env_decimal_unset_returns_default():
+    """_parse_env_decimal returns the default when the env var is not set."""
+    result = _parse_env_decimal("_GATE_TEST_VAR_UNSET_XYZ", Decimal("10000"))
+    assert result == Decimal("10000")
+
+
+def test_parse_env_decimal_valid_value_parsed():
+    """_parse_env_decimal returns the parsed Decimal when the env var holds a valid number."""
+    with patch.dict("os.environ", {"_GATE_TEST_VAR_XYZ": "25000"}):
+        result = _parse_env_decimal("_GATE_TEST_VAR_XYZ", Decimal("10000"))
+    assert result == Decimal("25000")
+
+
+def test_parse_env_decimal_invalid_raises():
+    """_parse_env_decimal raises ValueError with the variable name when the value is unparseable."""
+    with patch.dict("os.environ", {"_GATE_TEST_VAR_XYZ": "not_a_number"}):
+        with pytest.raises(ValueError, match="_GATE_TEST_VAR_XYZ"):
+            _parse_env_decimal("_GATE_TEST_VAR_XYZ", Decimal("10000"))

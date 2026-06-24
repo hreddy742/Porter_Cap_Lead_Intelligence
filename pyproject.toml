@@ -30,6 +30,10 @@ dependencies = [
     # Dashboard
     "streamlit>=1.35",
 
+    # API
+    "fastapi>=0.110",
+    "uvicorn[standard]>=0.29",
+
     # Utilities
     "python-dotenv>=1.0",
     "tenacity>=8.0",      # retry logic

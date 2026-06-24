@@ -311,16 +311,16 @@ def test_scoring_is_deterministic(mock_gates):
 
 
 def test_hot_threshold():
-    """Score >= 75 maps to 'hot'."""
-    assert _assign_tier(75) == "hot"
+    """Score >= 70 maps to 'hot'."""
+    assert _assign_tier(70) == "hot"
     assert _assign_tier(100) == "hot"
-    assert _assign_tier(76) == "hot"
+    assert _assign_tier(73) == "hot"
 
 
 def test_warm_threshold():
-    """Score >= 55 and < 75 maps to 'warm'."""
+    """Score >= 55 and < 70 maps to 'warm'."""
     assert _assign_tier(55) == "warm"
-    assert _assign_tier(74) == "warm"
+    assert _assign_tier(69) == "warm"
     assert _assign_tier(60) == "warm"
 
 
@@ -508,4 +508,129 @@ def test_null_naics_code_gives_zero_naics_porter_fit_bonus(mock_gates):
     pf = result["component_breakdown"]["porter_fit"]
     assert pf["points"] == 10, (
         f"Null NAICS should give porter_fit=10 (country+award only), got {pf['points']}"
+    )
+
+
+# ─── Test 19: rescore — stale warm company becomes hot under new 70 threshold ──
+
+
+@patch("app.processing.scoring.evaluate_mandatory_gates")
+def test_rescore_stale_warm_company_becomes_hot(mock_gates):
+    """
+    A company previously scored 73 under threshold=75 (tier='warm') gets a NEW
+    hot lead_score row when re-scored under the corrected threshold=70.
+
+    Invariants verified:
+      - score_company() produces total_score=73, tier='hot' (not 'warm')
+      - Exactly 1 new LeadScore is added to the session (historical row untouched)
+      - The existing LeadCandidate.tier is updated to 'hot' in-place
+      - No UPDATE or DELETE operations touch old LeadScore rows
+    """
+    mock_gates.return_value = _GATE_PASSED
+
+    # Full Phase 1 profile → 73 points:
+    #   porter_fit 25 = NAICS(15) + US(5) + award-in-range(5)
+    #   why_now    30 = freshness >= 0.8
+    #   ar_fit     10 = NAICS(7) + contract-signal(3), capped at 10
+    #   evidence_q  8 = 2-items(5) + source_url(3)
+    #   total      73
+    company = _make_company(naics_code="541330", country="US")
+    cfg = _make_scoring_config()
+    ev1 = _make_evidence(source_url="https://usaspending.gov/award/1")
+    ev2 = _make_evidence(source_url="https://usaspending.gov/award/2")
+    signal = _make_signal(
+        signal_type="CONTRACT_AWARD",
+        freshness_score=0.85,
+        award_amount=1_500_000,
+        evidence_id=ev1.id,
+    )
+
+    # Simulate an existing LeadCandidate that was scored warm under threshold=75.
+    existing_lead = MagicMock(spec=LeadCandidate)
+    existing_lead.id = uuid.uuid4()
+    existing_lead.tier = "warm"
+    existing_lead.current_score = 73
+    existing_lead.status = "active"
+    existing_lead.deleted_at = None
+
+    db = _clean_session(company, cfg, [ev1, ev2], [signal], existing_lead)
+    result = score_company(company.id, db)
+
+    # Score and tier must reflect the new threshold=70.
+    assert result["scored"] is True
+    assert result["total_score"] == 73
+    assert result["tier"] == "hot", (
+        f"Expected 'hot' under threshold=70 for score=73, got '{result['tier']}'"
+    )
+
+    # Exactly one NEW LeadScore inserted — old row is never touched.
+    new_scores = [o for o in db._added if isinstance(o, LeadScore)]
+    assert len(new_scores) == 1, (
+        f"Expected 1 new LeadScore, got {len(new_scores)}"
+    )
+    assert new_scores[0].tier == "hot"
+    assert new_scores[0].total_score == 73
+
+    # The existing LeadCandidate is updated in-place (not re-added to session).
+    new_candidates = [o for o in db._added if isinstance(o, LeadCandidate)]
+    assert len(new_candidates) == 0, (
+        "Existing LeadCandidate should be mutated in-place, not re-added"
+    )
+    assert existing_lead.tier == "hot", (
+        f"existing_lead.tier should be 'hot', got '{existing_lead.tier}'"
+    )
+
+
+# ─── Test 20: SUBCONTRACT_AWARD scores why_now and ar_fit ────────────────────
+
+
+@patch("app.processing.scoring.evaluate_mandatory_gates")
+def test_subcontract_award_signal_scores_why_now_and_ar_fit(mock_gates):
+    """
+    A SUBCONTRACT_AWARD signal must contribute to why_now and ar_fit, not score 0.
+
+    Before the fix, the engine filtered on signal_type == 'CONTRACT_AWARD' only,
+    leaving SUBCONTRACT_AWARD signals invisible to both components. After the fix,
+    _AWARD_SIGNAL_TYPES includes both types and subaward companies score correctly.
+
+    Profile used (subaward company without NAICS — matches real subawards API data):
+      - signal_type=SUBCONTRACT_AWARD, freshness=0.74 → why_now=18 (0.5 ≤ fs < 0.8)
+      - NAICS=None → no NAICS bonus in ar_fit or porter_fit
+      - ar_fit gets +3 from the contract signal alone
+    """
+    mock_gates.return_value = _GATE_PASSED
+
+    company = _make_company(naics_code=None, country="US")
+    cfg = _make_scoring_config()
+    ev = _make_evidence(source_url="https://usaspending.gov/subaward/1")
+    signal = _make_signal(
+        signal_type="SUBCONTRACT_AWARD",
+        freshness_score=0.74,
+        award_amount=14_280_573.0,
+        evidence_id=ev.id,
+    )
+
+    db = _clean_session(company, cfg, [ev], [signal])
+    result = score_company(company.id, db)
+
+    assert result["scored"] is True
+
+    breakdown = result["component_breakdown"]
+
+    # why_now must pick up the SUBCONTRACT_AWARD signal (freshness 0.74 → 18 pts).
+    assert breakdown["why_now"]["points"] == 18, (
+        f"why_now should be 18 for freshness=0.74 SUBCONTRACT_AWARD, "
+        f"got {breakdown['why_now']['points']}"
+    )
+
+    # ar_fit must pick up the contract signal (+3 for having any award signal).
+    assert breakdown["ar_fit"]["points"] == 3, (
+        f"ar_fit should be 3 for SUBCONTRACT_AWARD signal (no NAICS), "
+        f"got {breakdown['ar_fit']['points']}"
+    )
+
+    # Total must be above 8 (the pre-fix broken score).
+    assert result["total_score"] > 8, (
+        f"SUBCONTRACT_AWARD company scored {result['total_score']}, "
+        "expected > 8 (pre-fix broken score)"
     )

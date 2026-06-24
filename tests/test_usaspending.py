@@ -74,6 +74,7 @@ def _award(n: int) -> dict:
 
 def _mock_response(results: list[dict], *, has_next: bool) -> MagicMock:
     resp = MagicMock()
+    resp.status_code = 200
     resp.raise_for_status.return_value = None
     resp.json.return_value = {
         "limit": 100,
@@ -109,7 +110,14 @@ def _run_connector(
         source_run = _make_source_run()
 
     # Clear env vars that could leak from the host shell; callers override via env=
-    env_patch = {"USASPENDING_MAX_PAGES": "", "USASPENDING_PAGE_LIMIT": ""}
+    env_patch = {
+        "USASPENDING_MAX_PAGES": "",
+        "USASPENDING_PAGE_LIMIT": "",
+        "USASPENDING_TIMEOUT_SECONDS": "",
+        "USASPENDING_MAX_RETRIES": "",
+        "USASPENDING_BACKOFF_BASE_SECONDS": "",
+        "USASPENDING_BACKOFF_MAX_SECONDS": "",
+    }
     if env:
         env_patch.update(env)
 
@@ -118,9 +126,13 @@ def _run_connector(
         mock_cls.return_value.__enter__.return_value = mock_client
         mock_client.post.side_effect = responses
 
-        with patch.dict("os.environ", env_patch):
-            connector = USASpendingConnector(session, source_run, source, fiscal_year=2025)
-            connector.run()
+        with patch("app.pipeline.connectors.usaspending.time.sleep"):
+            with patch(
+                "app.pipeline.connectors.usaspending.random.uniform", return_value=0.0
+            ):
+                with patch.dict("os.environ", env_patch):
+                    connector = USASpendingConnector(session, source_run, source, fiscal_year=2025)
+                    connector.run()
 
     return source_run, session, mock_client
 
@@ -161,6 +173,7 @@ def test_timeout_marks_source_run_failed():
 
     source_run, _session, mock_client = _run_connector(
         responses=[timeout_exc],  # side_effect raises the exception
+        env={"USASPENDING_MAX_RETRIES": "0"},  # disable retries so one timeout = immediate fail
     )
 
     assert source_run.status == "failed", "status must be 'failed' after timeout"
@@ -366,6 +379,22 @@ def test_award_type_codes_sent_in_request_body():
 # ─── Test 12: generated_internal_id requested in API fields ──────────────────
 
 
+def test_invalid_fields_not_in_requested_fields():
+    """
+    'Action Type' and 'Action Type Description' are not valid field names for
+    spending_by_transaction and cause HTTP 400 when included.  Guard against
+    re-introduction.
+    """
+    from app.pipeline.connectors.usaspending import _FIELDS
+
+    assert "Action Type" not in _FIELDS, (
+        "'Action Type' is not a valid spending_by_transaction field — causes HTTP 400"
+    )
+    assert "Action Type Description" not in _FIELDS, (
+        "'Action Type Description' is not a valid spending_by_transaction field — causes HTTP 400"
+    )
+
+
 def test_generated_internal_id_in_requested_fields():
     """
     The connector must request generated_internal_id from the API.
@@ -418,3 +447,269 @@ def test_connector_source_url_is_not_homepage():
     assert "usaspending.gov/award/" in added.source_url, (
         "source_url must be an award detail URL"
     )
+
+
+# ─── Retry / backoff helpers ──────────────────────────────────────────────────
+
+
+def _retryable_response(status_code: int) -> MagicMock:
+    """Mock response for a retryable HTTP error (429, 500, 502, 503, 504).
+
+    status_code is set so the connector's retryable-set check fires.
+    raise_for_status is never called on these mocks.
+    """
+    resp = MagicMock()
+    resp.status_code = status_code
+    return resp
+
+
+def _permanent_error_response(status_code: int) -> MagicMock:
+    """Mock response for a permanent client error (400, 401, 403, 404).
+
+    status_code is NOT in the retryable set, so raise_for_status() is called
+    and raises HTTPStatusError — connector re-raises immediately.
+    """
+    resp = MagicMock()
+    resp.status_code = status_code
+    resp.raise_for_status.side_effect = httpx.HTTPStatusError(
+        f"HTTP {status_code}", request=MagicMock(), response=resp
+    )
+    return resp
+
+
+# ─── Test 15: HTTP 429 retries then succeeds ─────────────────────────────────
+
+
+def test_http_429_retries_then_succeeds():
+    """
+    A 429 on the first attempt is retried; the second attempt succeeds.
+    Exactly 2 HTTP calls are made and status='completed'.
+    """
+    responses = [
+        _retryable_response(429),
+        _mock_response([_award(1)], has_next=False),
+    ]
+
+    source_run, _session, mock_client = _run_connector(
+        responses=responses, env={"USASPENDING_MAX_RETRIES": "3"}
+    )
+
+    assert mock_client.post.call_count == 2, "should retry once after 429"
+    assert source_run.status == "completed"
+    assert source_run.records_fetched == 1
+
+
+# ─── Test 16: HTTP 500 retries then succeeds ─────────────────────────────────
+
+
+def test_http_500_retries_then_succeeds():
+    """
+    A 500 on the first attempt is retried; the second attempt succeeds.
+    Exactly 2 HTTP calls are made and status='completed'.
+    """
+    responses = [
+        _retryable_response(500),
+        _mock_response([_award(2)], has_next=False),
+    ]
+
+    source_run, _session, mock_client = _run_connector(
+        responses=responses, env={"USASPENDING_MAX_RETRIES": "3"}
+    )
+
+    assert mock_client.post.call_count == 2, "should retry once after 500"
+    assert source_run.status == "completed"
+    assert source_run.records_fetched == 1
+
+
+# ─── Test 17: HTTP 400 does not retry ────────────────────────────────────────
+
+
+def test_http_400_does_not_retry():
+    """
+    A 400 is a permanent client error. The connector must not retry it —
+    exactly 1 HTTP call is made and status='failed'.
+    """
+    responses = [_permanent_error_response(400)]
+
+    source_run, _session, mock_client = _run_connector(responses=responses)
+
+    assert mock_client.post.call_count == 1, "permanent 400 must not be retried"
+    assert source_run.status == "failed"
+
+
+# ─── Test 18: network timeout retries then succeeds ──────────────────────────
+
+
+def test_network_timeout_retries_then_succeeds():
+    """
+    An httpx.TimeoutException on the first attempt is retried.
+    The second attempt succeeds. status='completed'.
+    """
+    responses = [
+        httpx.TimeoutException("read timed out"),
+        _mock_response([_award(3)], has_next=False),
+    ]
+
+    source_run, _session, mock_client = _run_connector(
+        responses=responses, env={"USASPENDING_MAX_RETRIES": "3"}
+    )
+
+    assert mock_client.post.call_count == 2, "should retry once after TimeoutException"
+    assert source_run.status == "completed"
+    assert source_run.records_fetched == 1
+
+
+# ─── Test 19: connection error retries then succeeds ─────────────────────────
+
+
+def test_connect_error_retries_then_succeeds():
+    """
+    An httpx.ConnectError (transient connection failure) on the first attempt
+    is retried. The second attempt succeeds. status='completed'.
+    """
+    responses = [
+        httpx.ConnectError("connection refused"),
+        _mock_response([_award(4)], has_next=False),
+    ]
+
+    source_run, _session, mock_client = _run_connector(
+        responses=responses, env={"USASPENDING_MAX_RETRIES": "3"}
+    )
+
+    assert mock_client.post.call_count == 2, "should retry once after ConnectError"
+    assert source_run.status == "completed"
+    assert source_run.records_fetched == 1
+
+
+# ─── Test 20: retries exhausted → ConnectorError ─────────────────────────────
+
+
+def test_retries_exhausted_raises_connector_error():
+    """
+    When all attempts fail (default max_retries=3 → 4 total attempts),
+    ConnectorError is raised, status='failed', and error_text mentions USASpending.
+    """
+    responses = [_retryable_response(500)] * 4  # 1 initial + 3 retries
+
+    source_run, _session, mock_client = _run_connector(
+        responses=responses, env={"USASPENDING_MAX_RETRIES": "3"}
+    )
+
+    assert mock_client.post.call_count == 4, "should try exactly max_retries+1 times"
+    assert source_run.status == "failed"
+    assert source_run.error_text is not None
+    assert "USASpending" in source_run.error_text
+
+
+# ─── Test 21: USASPENDING_TIMEOUT_SECONDS passed to httpx.Client ─────────────
+
+
+def test_timeout_env_var_passed_to_client():
+    """
+    When USASPENDING_TIMEOUT_SECONDS=45, httpx.Client must be constructed
+    with timeout=45.0 — not the hardcoded 30.0 default.
+    """
+    pages = [_mock_response([_award(1)], has_next=False)]
+
+    with patch("app.pipeline.connectors.usaspending.httpx.Client") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value.__enter__.return_value = mock_client
+        mock_client.post.side_effect = pages
+
+        with patch("app.pipeline.connectors.usaspending.time.sleep"):
+            with patch(
+                "app.pipeline.connectors.usaspending.random.uniform", return_value=0.0
+            ):
+                with patch.dict("os.environ", {
+                    "USASPENDING_TIMEOUT_SECONDS": "45",
+                    "USASPENDING_MAX_PAGES": "",
+                    "USASPENDING_PAGE_LIMIT": "",
+                    "USASPENDING_MAX_RETRIES": "",
+                    "USASPENDING_BACKOFF_BASE_SECONDS": "",
+                    "USASPENDING_BACKOFF_MAX_SECONDS": "",
+                }):
+                    connector = USASpendingConnector(
+                        _make_session(), _make_source_run(), _make_source(),
+                        fiscal_year=2025,
+                    )
+                    connector.run()
+
+    mock_cls.assert_called_once_with(timeout=45.0)
+
+
+# ─── Test 22: RemoteProtocolError retries then succeeds ──────────────────────
+
+
+def test_remote_protocol_error_retries_then_succeeds():
+    """
+    An httpx.RemoteProtocolError (broken/incomplete HTTP response from server
+    or proxy) on the first attempt is retried. The second attempt succeeds.
+    """
+    responses = [
+        httpx.RemoteProtocolError("peer closed connection without sending complete message body"),
+        _mock_response([_award(5)], has_next=False),
+    ]
+
+    source_run, _session, mock_client = _run_connector(
+        responses=responses, env={"USASPENDING_MAX_RETRIES": "3"}
+    )
+
+    assert mock_client.post.call_count == 2, "should retry once after RemoteProtocolError"
+    assert source_run.status == "completed"
+    assert source_run.records_fetched == 1
+
+
+# ─── Test 23: default max_pages is 200 when env var is absent ────────────────
+
+
+def test_default_max_pages_is_200_when_env_var_absent():
+    """
+    When USASPENDING_MAX_PAGES is not set (or empty), max_pages must default
+    to 200 — not None (unlimited). This cap prevents server-side disconnects
+    on long-running pulls that fail around page 250.
+    """
+    with patch.dict(
+        "os.environ",
+        {
+            "USASPENDING_MAX_PAGES": "",
+            "USASPENDING_PAGE_LIMIT": "",
+            "USASPENDING_TIMEOUT_SECONDS": "",
+            "USASPENDING_MAX_RETRIES": "",
+            "USASPENDING_BACKOFF_BASE_SECONDS": "",
+            "USASPENDING_BACKOFF_MAX_SECONDS": "",
+        },
+    ):
+        connector = USASpendingConnector(
+            _make_session(), _make_source_run(), _make_source(), fiscal_year=2025
+        )
+
+    assert connector.max_pages == 200, (
+        "max_pages must default to 200 when env var is absent — "
+        "None (unlimited) is no longer the default"
+    )
+
+
+# ─── Test 24: env var override still works ────────────────────────────────────
+
+
+def test_max_pages_env_var_override_respected():
+    """
+    When USASPENDING_MAX_PAGES=5 is set, the connector uses 5, not 200.
+    Env var override must continue to work after the default changed from None.
+    """
+    with patch.dict(
+        "os.environ",
+        {
+            "USASPENDING_MAX_PAGES": "5",
+            "USASPENDING_PAGE_LIMIT": "",
+            "USASPENDING_TIMEOUT_SECONDS": "",
+            "USASPENDING_MAX_RETRIES": "",
+            "USASPENDING_BACKOFF_BASE_SECONDS": "",
+            "USASPENDING_BACKOFF_MAX_SECONDS": "",
+        },
+    ):
+        connector = USASpendingConnector(
+            _make_session(), _make_source_run(), _make_source(), fiscal_year=2025
+        )
+
+    assert connector.max_pages == 5, "explicit env var must override the 200 default"
