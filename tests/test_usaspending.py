@@ -711,5 +711,16 @@ def test_max_pages_env_var_override_respected():
         connector = USASpendingConnector(
             _make_session(), _make_source_run(), _make_source(), fiscal_year=2025
         )
-
     assert connector.max_pages == 5, "explicit env var must override the 200 default"
+
+
+def test_expanded_naics_sectors_in_connector() -> None:
+    from app.pipeline.connectors.usaspending import _TARGET_NAICS_PREFIXES
+
+    assert "21" in _TARGET_NAICS_PREFIXES
+    assert "44" in _TARGET_NAICS_PREFIXES
+    assert "45" in _TARGET_NAICS_PREFIXES
+    assert "51" in _TARGET_NAICS_PREFIXES
+    assert "55" in _TARGET_NAICS_PREFIXES
+    assert "72" in _TARGET_NAICS_PREFIXES
+    assert "81" in _TARGET_NAICS_PREFIXES

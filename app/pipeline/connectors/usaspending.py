@@ -61,18 +61,27 @@ _FIELDS = [
 
 _AWARD_TYPE_CODES = ["A", "B", "C", "D"]  # contracts only (excludes grants/loans)
 
-# 2-digit NAICS sector prefixes for industries most likely to need A/R financing.
-# The USASpending API accepts prefix matching in the naics_codes filter.
-# These sectors commonly carry large receivables against government contracts:
-#   23  = Construction
-#   31-33 = Manufacturing
-#   42  = Wholesale Trade
-#   48-49 = Transportation and Warehousing
-#   54  = Professional, Scientific, and Technical Services
-#   56  = Administrative and Support / Staffing Services
-# Excluding DoD-prime-dominated NAICS is not needed: scoring already penalises
-# out-of-range award amounts, so large primes naturally score lower.
-_TARGET_NAICS_PREFIXES = ["23", "31", "32", "33", "42", "48", "49", "54", "56"]
+# ICP sectors confirmed by John Cox Miller,
+# Porter Capital, June 24 2026.
+# Soft-flagged excluded sectors (11,22,23,52,61,
+# 62,71,92) are not targeted here but are stored
+# if found via other signals.
+_TARGET_NAICS_PREFIXES = frozenset({
+    # Original ICP sectors
+    "31", "32", "33",  # Manufacturing
+    "42",              # Wholesale Trade
+    "48", "49",        # Transportation and Warehousing
+    "54",              # Professional/Technical Services
+    "56",              # Administrative/Staffing Services
+
+    # New sectors confirmed by John Cox Miller June 24 2026
+    "21",              # Mining
+    "44", "45",        # Retail Trade
+    "51",              # Information
+    "55",              # Management of Companies
+    "72",              # Accommodation and Food Services
+    "81",              # Other Services
+})
 
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
@@ -280,7 +289,7 @@ class USASpendingConnector:
             "filters": {
                 "award_type_codes": _AWARD_TYPE_CODES,
                 "time_period": [{"start_date": start_date, "end_date": end_date}],
-                "naics_codes": _TARGET_NAICS_PREFIXES,
+                "naics_codes": sorted(_TARGET_NAICS_PREFIXES),
             },
             "fields": _FIELDS,
             "page": page,
