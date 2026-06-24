@@ -468,11 +468,18 @@ def list_leads_filtered(
                              (approximate: lead_candidates has no first_seen_pipeline_run_id
                               or last_touched_pipeline_run_id FK, so created_at is used as proxy)
     """
+    # Archive-tier leads have status='archived' (set by the pipeline after scoring).
+    # All other tiers only contain active leads, so keep the active-only guard there.
+    if tier == "archive":
+        status_filter = LeadCandidate.status.in_(["active", "archived"])
+    else:
+        status_filter = LeadCandidate.status == "active"
+
     stmt = (
         select(LeadCandidate)
         .options(joinedload(LeadCandidate.company))
         .join(Company, LeadCandidate.company_id == Company.id)
-        .where(LeadCandidate.status == "active")
+        .where(status_filter)
         .where(Company.deleted_at.is_(None))
     )
 
