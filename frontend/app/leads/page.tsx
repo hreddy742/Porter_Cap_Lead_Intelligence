@@ -15,7 +15,7 @@ export default async function LeadsPage({
     typeof sp.status === "string" ? sp.status : undefined;
 
   const params: Record<string, string> = {
-    limit: "200",
+    limit: "2000",
     sort_by: "score_desc",
   };
   if (tier) params.tier = tier;
