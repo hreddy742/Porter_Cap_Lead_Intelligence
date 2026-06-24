@@ -222,15 +222,18 @@ def test_excluded_industry_returns_excluded_industry_gate():
     assert result["should_score"] is False
 
 
-def test_excluded_naics_returns_excluded_industry_gate():
-    """Company with NAICS code starting with '52' (Finance) is archived as excluded_industry."""
+def test_naics_52x_no_longer_hard_blocked():
+    """NAICS 52x (Finance) is no longer a hard block — company passes Gate 4.
+    Design decision June 24 2026: all sector filtering is soft-flag only;
+    humans and AI decide. The lead is still scored and flagged via flag_excluded_sector().
+    """
     company = _make_company(naics_code="522110")  # Commercial Banking
     db = _make_session(company=company, evidence_items=_EVIDENCE, signals=_FRESH_SIGNAL)
 
     result = evaluate_mandatory_gates(company.id, db)
 
-    assert result["passed"] is False
-    assert result["gate_reason"] == "excluded_industry"
+    assert result["passed"] is True
+    assert result["should_score"] is True
 
 
 # ─── Test 5: non-US company → non_us gate ────────────────────────────────────

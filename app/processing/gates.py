@@ -24,9 +24,6 @@ from app.processing.suppression import check_suppression
 
 logger = structlog.get_logger(__name__)
 
-# Prefixes used by the hard-block gate (Gate 4 — excluded_industry).
-_HARD_BLOCK_NAICS_PREFIXES = ("52", "61", "92")
-
 # Prefixes for the soft-flag (Phase 2B ICP policy, confirmed by John Cox Miller June 24 2026).
 # Leads in these sectors are scored and stored normally but hidden from sales by default.
 _EXCLUDED_NAICS_PREFIXES: frozenset[str] = frozenset({
@@ -92,11 +89,6 @@ def _gated(gate_reason: str, route: str) -> dict:
 
 
 def _is_excluded_industry(company: Company) -> bool:
-    naics = company.naics_code
-    if naics:
-        for prefix in _HARD_BLOCK_NAICS_PREFIXES:
-            if str(naics).startswith(prefix):
-                return True
     industry = (company.industry or "").lower()
     return any(kw in industry for kw in _EXCLUDED_INDUSTRY_KEYWORDS)
 
