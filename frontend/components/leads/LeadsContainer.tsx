@@ -176,8 +176,14 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
       result = result.filter((l) => {
         const isPrime = l.signal_type === "CONTRACT_AWARD";
         const isSub = l.signal_type === "SUBCONTRACT_AWARD";
+        const isSBAPIF = l.signal_type === "SBA_LOAN_PIF";
+        const isSBAActive = l.signal_type === "SBA_LOAN_ACTIVE";
         return sourceFilters.some(
-          (sf) => (sf === "Prime" && isPrime) || (sf === "Sub" && isSub)
+          (sf) =>
+            (sf === "Prime" && isPrime) ||
+            (sf === "Sub" && isSub) ||
+            (sf === "SBA PIF" && isSBAPIF) ||
+            (sf === "SBA Active" && isSBAActive)
         );
       });
     if (statusFilters.length > 0)
@@ -239,7 +245,7 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
 
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: 10, color: "#A1A1AA", marginRight: 1 }}>Source</span>
-            {["Prime", "Sub"].map((s) => (
+            {["Prime", "Sub", "SBA PIF", "SBA Active"].map((s) => (
               <Chip
                 key={s}
                 label={s}
@@ -405,6 +411,8 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
                 const tierCfg = TIER_CFG[tierKey] ?? TIER_CFG.archive;
                 const isPrime = lead.signal_type === "CONTRACT_AWARD";
                 const isSub = lead.signal_type === "SUBCONTRACT_AWARD";
+                const isSBAPIF = lead.signal_type === "SBA_LOAN_PIF";
+                const isSBAActive = lead.signal_type === "SBA_LOAN_ACTIVE";
                 const pal = avatarPalette(lead.company_name);
                 const initials = getInitials(lead.company_name);
                 const rowBg = idx % 2 === 0 ? "#FFFFFF" : "#FAFAFA";
@@ -418,6 +426,8 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
                     tierCfg={tierCfg}
                     isPrime={isPrime}
                     isSub={isSub}
+                    isSBAPIF={isSBAPIF}
+                    isSBAActive={isSBAActive}
                     pal={pal}
                     initials={initials}
                   />
@@ -455,11 +465,13 @@ interface RowProps {
   tierCfg: { color: string; bg: string; label: string };
   isPrime: boolean;
   isSub: boolean;
+  isSBAPIF: boolean;
+  isSBAActive: boolean;
   pal: { bg: string; text: string };
   initials: string;
 }
 
-function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, pal, initials }: RowProps) {
+function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, isSBAPIF, isSBAActive, pal, initials }: RowProps) {
   const [hovered, setHovered] = useState(false);
 
   const naics = lead.company_naics ?? "—";
@@ -661,6 +673,38 @@ function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, pal, initials }: 
               }}
             >
               {isPrime ? "↑ Prime" : "↓ Sub"}
+            </span>
+          ) : isSBAPIF ? (
+            <span
+              title="Paid off SBA loan — strong prospect"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                padding: "3px 7px",
+                borderRadius: 4,
+                fontSize: 10,
+                fontWeight: 500,
+                background: "rgba(22,163,74,0.10)",
+                color: "#15803D",
+              }}
+            >
+              ✓ SBA Alumni
+            </span>
+          ) : isSBAActive ? (
+            <span
+              title="Active SBA loan — lien on receivables, needs qualification"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                padding: "3px 7px",
+                borderRadius: 4,
+                fontSize: 10,
+                fontWeight: 500,
+                background: "rgba(217,119,6,0.10)",
+                color: "#B45309",
+              }}
+            >
+              ⚠ Active SBA
             </span>
           ) : (
             <span style={{ fontSize: 12, color: "#A1A1AA" }}>—</span>

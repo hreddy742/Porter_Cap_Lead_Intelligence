@@ -57,6 +57,14 @@ _AR_HEAVY_NAICS = ("54", "56", "33", "48", "23", "62")
 # SUBCONTRACT_AWARD is emitted by the usaspending_subawards connector.
 _AWARD_SIGNAL_TYPES = frozenset({"CONTRACT_AWARD", "SUBCONTRACT_AWARD"})
 
+# SBA signal types and their fixed why_now bonuses.
+# Confirmed by John Cox Miller, Porter Capital, June 25 2026.
+_SBA_SIGNAL_TYPES = frozenset({"SBA_LOAN_PIF", "SBA_LOAN_ACTIVE"})
+_SBA_WHY_NOW_BONUS: dict[str, int] = {
+    "SBA_LOAN_PIF": 8,    # paid-off loan: demonstrated financing need, now scaling
+    "SBA_LOAN_ACTIVE": 4, # active lien on receivables: needs qualification call
+}
+
 # Phase 1 cap for A/R Financing Fit component.
 _AR_FIT_PHASE1_CAP = 10
 
@@ -226,6 +234,16 @@ def score_company(company_id: UUID, db: Session) -> dict:
             wn_points = 8
         if wn_points > 0:
             wn_evidence.append(freshest.evidence_id)
+
+    # SBA why_now bonus: fixed by loan type, not freshness.
+    # Take the best (highest) bonus if multiple SBA signals exist.
+    sba_signals = [s for s in signals if s.signal_type in _SBA_SIGNAL_TYPES]
+    if sba_signals:
+        best_sba = max(sba_signals, key=lambda s: _SBA_WHY_NOW_BONUS.get(s.signal_type, 0))
+        sba_bonus = _SBA_WHY_NOW_BONUS.get(best_sba.signal_type, 0)
+        if sba_bonus > 0:
+            wn_points = min(30, wn_points + sba_bonus)
+            wn_evidence.append(best_sba.evidence_id)
 
     _check_integrity("why_now", wn_points, wn_evidence)
     cited_uuids.update(wn_evidence)

@@ -41,7 +41,12 @@ _CLAIM_CONTRACT_AWARD = "CONTRACT_AWARD"
 _CLAIM_SUBCONTRACT_AWARD = "SUBCONTRACT_AWARD"
 _CONFIDENCE_API = Decimal("0.9")
 _CONFIDENCE_SUBAWARD = Decimal("0.85")  # slightly lower: no UEI, no NAICS in response
+_CONFIDENCE_SBA = Decimal("0.85")       # FOIA bulk data, no UEI in response
 _FRESHNESS_WINDOW_DAYS = 180
+# SBA loans span up to 4+ years of history (filter: 2022-01-01+).
+# Use a longer freshness window so older loans still exceed the 0.1 Gate 3 floor.
+_SBA_FRESHNESS_WINDOW_DAYS = 1825  # 5 years
+_SBA_SOURCE_URL = "https://data.sba.gov/dataset/7-a-504-foia"
 
 
 def _parse_date(value: object) -> date | None:
@@ -58,10 +63,10 @@ def _parse_date(value: object) -> date | None:
     return None
 
 
-def _compute_freshness(action_date: date) -> float:
+def _compute_freshness(action_date: date, window_days: int = _FRESHNESS_WINDOW_DAYS) -> float:
     """Clamp to [0.0, 1.0]; future dates (negative days_old) are treated as maximally fresh."""
     days_old = (date.today() - action_date).days
-    return min(1.0, max(0.0, round(1.0 - (days_old / _FRESHNESS_WINDOW_DAYS), 4)))
+    return min(1.0, max(0.0, round(1.0 - (days_old / window_days), 4)))
 
 
 def _build_evidence_item(
@@ -207,11 +212,79 @@ def _extract_subaward_evidence(
     return [evidence]
 
 
+def _extract_sba_evidence(
+    raw_event: RawSourceEvent, payload: dict, log: structlog.BoundLogger, db: Session
+) -> list[EvidenceItem]:
+    """Handle SBA 7(a) FOIA CSV payloads (BorrName key).
+
+    claim_supported is taken from payload["sba_signal_type"]:
+      "SBA_LOAN_PIF"    — paid-in-full loan
+      "SBA_LOAN_ACTIVE" — active loan with lien on receivables
+    """
+    company_name_raw = payload.get("BorrName")
+    if not company_name_raw or not str(company_name_raw).strip():
+        log.warning("evidence_quarantine_missing_company_name")
+        return []
+    company_name = str(company_name_raw).strip()
+
+    approval_date = _parse_date(payload.get("ApprovalDate"))
+    if approval_date is None:
+        log.warning("evidence_quarantine_bad_action_date", value=payload.get("ApprovalDate"))
+        return []
+
+    claim_supported = payload.get("sba_signal_type", "SBA_LOAN_ACTIVE")
+    amount_raw = payload.get("GrossApproval")
+    loan_status = payload.get("LoanStatus") or ""
+
+    extracted_fields: dict = {
+        "company_name": company_name,
+        "uei": None,
+        "award_amount": str(amount_raw) if amount_raw is not None else None,
+        "loan_amount": str(amount_raw) if amount_raw is not None else None,
+        "action_date": approval_date.isoformat(),
+        "approval_date": approval_date.isoformat(),
+        "loan_status": loan_status,
+        "naics_code": payload.get("NaicsCode"),
+        "naics_description": payload.get("NaicsDescription"),
+        "state_code": payload.get("BorrState"),
+        "city": payload.get("BorrCity"),
+        "zip": payload.get("BorrZip"),
+        "street": payload.get("BorrStreet"),
+        "jobs_supported": payload.get("JobsSupported"),
+        "sba_pif": loan_status.upper() == "PIF",
+        "description": payload.get("description"),
+    }
+
+    # Use a longer freshness window for SBA loans since the data covers 4+ years
+    freshness = _compute_freshness(approval_date, window_days=_SBA_FRESHNESS_WINDOW_DAYS)
+    source_url = raw_event.source_url or _SBA_SOURCE_URL
+
+    evidence = _build_evidence_item(
+        raw_event=raw_event,
+        source_url=source_url,
+        extracted_fields=extracted_fields,
+        claim_supported=claim_supported,
+        confidence_score=_CONFIDENCE_SBA,
+        freshness=freshness,
+    )
+    db.add(evidence)
+    db.flush()
+    log.info(
+        "evidence_extracted",
+        claim=claim_supported,
+        company=company_name,
+        state=payload.get("BorrState"),
+        freshness=freshness,
+    )
+    return [evidence]
+
+
 def extract_evidence(raw_event_id: UUID, db: Session) -> list[EvidenceItem]:
     """
     Extract structured evidence from one raw_source_events row.
 
     Dispatches to the correct handler based on payload shape:
+      - "BorrName" key → SBA 7(a) loan → SBA_LOAN_PIF or SBA_LOAN_ACTIVE
       - lowercase "recipient_name" key → subaward → SUBCONTRACT_AWARD
       - title-case "Recipient Name" key → prime award → CONTRACT_AWARD
 
@@ -227,6 +300,8 @@ def extract_evidence(raw_event_id: UUID, db: Session) -> list[EvidenceItem]:
     payload: dict = raw_event.payload or {}
     log = logger.bind(raw_event_id=str(raw_event_id))
 
+    if "BorrName" in payload:
+        return _extract_sba_evidence(raw_event, payload, log, db)
     if "recipient_name" in payload and "Recipient Name" not in payload:
         return _extract_subaward_evidence(raw_event, payload, log, db)
     return _extract_prime_award_evidence(raw_event, payload, log, db)

@@ -23,6 +23,7 @@ from app.db.models import PipelineRun, RawSourceEvent, SourceRegistry, SourceRun
 from app.ops.sentry import capture_exception
 from app.pipeline.connectors.usaspending import USASpendingConnector
 from app.pipeline.connectors.usaspending_subawards import USASpendingSubawardsConnector
+from app.pipeline.connectors.sba_loans import SBALoansConnector
 from app.processing.evidence import extract_evidence
 from app.processing.resolution import resolve_company_for_evidence
 from app.processing.scoring import score_company
@@ -68,6 +69,10 @@ def _is_usaspending_subawards(source: SourceRegistry) -> bool:
     return source.name.lower() == "usaspending_subawards"
 
 
+def _is_sba_loans(source: SourceRegistry) -> bool:
+    return source.name.lower() == "sba_loans"
+
+
 def _execute_source(
     source: SourceRegistry,
     source_run: SourceRun,
@@ -87,6 +92,9 @@ def _execute_source(
             connector.run()  # sets source_run.status; calls db.commit() internally
         elif _is_usaspending_subawards(source):
             connector = USASpendingSubawardsConnector(db, source_run, source)
+            connector.run()
+        elif _is_sba_loans(source):
+            connector = SBALoansConnector(db, source_run, source)
             connector.run()
         else:
             log.warning("orchestrator_unknown_source_skipped", source_name=source.name)

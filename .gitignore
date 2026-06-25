@@ -43,6 +43,9 @@ alembic/versions/__pycache__/
 *.log
 logs/
 
+# SBA loan cache — 150 MB bulk CSV, regenerated on first run
+data/sba_loans_cache.csv
+
 # Exports — keep directory tracked, ignore generated CSVs
 exports/*.csv
 

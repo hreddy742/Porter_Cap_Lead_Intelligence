@@ -30,7 +30,21 @@ logger = structlog.get_logger(__name__)
 
 _CLAIM_CONTRACT_AWARD = "CONTRACT_AWARD"
 _CLAIM_SUBCONTRACT_AWARD = "SUBCONTRACT_AWARD"
-_HANDLED_CLAIMS = frozenset({_CLAIM_CONTRACT_AWARD, _CLAIM_SUBCONTRACT_AWARD})
+_CLAIM_SBA_LOAN_PIF = "SBA_LOAN_PIF"
+_CLAIM_SBA_LOAN_ACTIVE = "SBA_LOAN_ACTIVE"
+_HANDLED_CLAIMS = frozenset({
+    _CLAIM_CONTRACT_AWARD,
+    _CLAIM_SUBCONTRACT_AWARD,
+    _CLAIM_SBA_LOAN_PIF,
+    _CLAIM_SBA_LOAN_ACTIVE,
+})
+
+# SBA signal strengths are fixed by loan status, not derived from loan amount.
+# Confirmed by John Cox Miller, Porter Capital, June 25 2026.
+_SBA_CLAIM_STRENGTHS: dict[str, str] = {
+    _CLAIM_SBA_LOAN_PIF: "strong",    # paid-off = proven financing need, now scaling
+    _CLAIM_SBA_LOAN_ACTIVE: "medium", # active lien on receivables, needs qualification
+}
 
 
 def classify_signal_strength(award_amount: Decimal | float | None) -> str:
@@ -116,7 +130,12 @@ def detect_signals_for_evidence(evidence_id: UUID, db: Session) -> list[Signal]:
         return list(existing)
 
     award_amount = _parse_amount(fields.get("award_amount"))
-    strength = classify_signal_strength(award_amount)
+
+    # SBA signal strength is determined by loan status, not loan amount.
+    if evidence.claim_supported in _SBA_CLAIM_STRENGTHS:
+        strength = _SBA_CLAIM_STRENGTHS[evidence.claim_supported]
+    else:
+        strength = classify_signal_strength(award_amount)
 
     signal = Signal(
         company_id=evidence.company_id,
