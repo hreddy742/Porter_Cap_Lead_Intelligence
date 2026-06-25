@@ -51,3 +51,10 @@ backups/*.sql
 
 # Runtime output artifacts
 outputs/
+
+# Error logs and debug scripts
+api.err
+frontend.err
+test_both_keys.py
+test_sam.py
+check_usa.py
