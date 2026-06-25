@@ -114,13 +114,31 @@ if ($frontendRunning.TcpTestSucceeded) {
 
 # Step 6 — SAM.gov daily enrichment
 Write-Step "Step 6 — Running SAM.gov daily enrichment"
-try {
-    $env:SAM_GOV_API_KEY_HARSHA = "SAM-2f41a987-96d3-4357-9c6d-d171d128daf2"
-    $env:SAM_GOV_API_KEY_KATE = "SAM-41285b6b-5645-40ae-9f07-000f121f985c"
-    python scripts/run_sam_enrichment.py 2>&1 | Out-Null
-    Write-Ok "SAM.gov enrichment complete"
-} catch {
-    Write-Warn "SAM.gov enrichment skipped: $_"
+# Load SAM.gov API keys from .env file (never hard-code keys in this script)
+$envFile = Join-Path $ProjectRoot ".env"
+if (Test-Path $envFile) {
+    Get-Content $envFile | ForEach-Object {
+        if ($_ -match '^\s*([^#][^=]+)=(.*)$') {
+            $name = $Matches[1].Trim()
+            $value = $Matches[2].Trim().Trim('"').Trim("'")
+            if (-not [System.Environment]::GetEnvironmentVariable($name)) {
+                [System.Environment]::SetEnvironmentVariable($name, $value, "Process")
+            }
+        }
+    }
+    Write-Ok "Loaded environment variables from .env"
+} else {
+    Write-Warn ".env file not found — SAM.gov keys must already be set in environment"
+}
+if (-not $env:SAM_GOV_API_KEY_HARSHA -and -not $env:SAM_GOV_API_KEY_KATE) {
+    Write-Warn "SAM_GOV_API_KEY_HARSHA and SAM_GOV_API_KEY_KATE not set — skipping enrichment"
+} else {
+    try {
+        python scripts/run_sam_enrichment.py 2>&1 | Out-Null
+        Write-Ok "SAM.gov enrichment complete"
+    } catch {
+        Write-Warn "SAM.gov enrichment skipped: $_"
+    }
 }
 
 # Step 7 — Open browser
