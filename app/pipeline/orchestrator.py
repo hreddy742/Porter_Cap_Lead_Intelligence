@@ -12,6 +12,7 @@ No Prefect, no cron, no Streamlit, no Salesforce, no AI.
 """
 from __future__ import annotations
 
+import os
 import uuid
 from datetime import datetime, timezone
 
@@ -37,7 +38,7 @@ def _utcnow() -> datetime:
 
 
 def _load_enabled_sources(db: Session) -> list[SourceRegistry]:
-    return (
+    sources = list(
         db.execute(
             select(SourceRegistry).where(
                 SourceRegistry.enabled == True,  # noqa: E712
@@ -47,6 +48,19 @@ def _load_enabled_sources(db: Session) -> list[SourceRegistry]:
         .scalars()
         .all()
     )
+
+    # SBA connector is controlled by env var in addition to the DB flag.
+    # When SBA_LOANS_ENABLED=true the connector runs even if the DB row
+    # has enabled=False (it is seeded disabled until UAT is complete).
+    if os.getenv("SBA_LOANS_ENABLED", "false").lower() == "true":
+        sba_source = db.execute(
+            select(SourceRegistry).where(SourceRegistry.name == "sba_loans")
+        ).scalar_one_or_none()
+        if sba_source is not None and not any(s.name == "sba_loans" for s in sources):
+            sources.append(sba_source)
+            logger.info("sba_source_force_enabled", reason="SBA_LOANS_ENABLED=true env var")
+
+    return sources
 
 
 def _get_raw_events(source_run_id: uuid.UUID, db: Session) -> list[RawSourceEvent]:

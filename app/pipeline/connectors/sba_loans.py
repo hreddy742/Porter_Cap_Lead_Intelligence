@@ -56,9 +56,9 @@ logger = structlog.get_logger(__name__)
 # ─── Constants ────────────────────────────────────────────────────────────────
 
 _DOWNLOAD_URL = (
-    "https://data.sba.gov/dataset/7-a-504-foia/resource/"
-    "aab00a57-b3e5-4b01-8e72-2b1c4c7e8e98/download/"
-    "foia-7afy2020-fy2012present.csv"
+    "https://data.sba.gov/en/dataset/0ff8e8e9-b967-4f4e-987c-6ac78c575087/"
+    "resource/d67d3ccb-2002-4134-a288-481b51cd3479/download/"
+    "foia-7a-fy2020-present-asof-260331.csv"
 )
 
 _DEFAULT_CACHE_PATH = "data/sba_loans_cache.csv"
@@ -103,7 +103,7 @@ _SBA_INCLUDED_NAICS_PREFIXES = frozenset({
     # "72"             # Restaurants/Hotels/Bars
 })
 
-_SOURCE_URL = "https://data.sba.gov/dataset/7-a-504-foia"
+_SOURCE_URL = "https://data.sba.gov/en/dataset/0ff8e8e9-b967-4f4e-987c-6ac78c575087"
 
 
 class ConnectorError(Exception):
@@ -142,17 +142,17 @@ class SBALoanRecord(BaseModel):
 
     model_config = ConfigDict(populate_by_name=True)
 
-    borr_name: str = Field(alias="BorrName")
-    borr_state: str = Field(alias="BorrState")
-    borr_city: str | None = Field(None, alias="BorrCity")
-    borr_street: str | None = Field(None, alias="BorrStreet")
-    borr_zip: str | None = Field(None, alias="BorrZip")
-    naics_code: str | None = Field(None, alias="NaicsCode")
-    naics_description: str | None = Field(None, alias="NaicsDescription")
-    gross_approval: Decimal = Field(alias="GrossApproval")
-    approval_date: date = Field(alias="ApprovalDate")
-    loan_status: str | None = Field(None, alias="LoanStatus")
-    jobs_supported: int | None = Field(None, alias="JobsSupported")
+    borr_name: str = Field(alias="borrname")
+    borr_state: str = Field(alias="borrstate")
+    borr_city: str | None = Field(None, alias="borrcity")
+    borr_street: str | None = Field(None, alias="borrstreet")
+    borr_zip: str | None = Field(None, alias="borrzip")
+    naics_code: str | None = Field(None, alias="naicscode")
+    naics_description: str | None = Field(None, alias="naicsdescription")
+    gross_approval: Decimal = Field(alias="grossapproval")
+    approval_date: date = Field(alias="approvaldate")
+    loan_status: str | None = Field(None, alias="loanstatus")
+    jobs_supported: int | None = Field(None, alias="jobssupported")
 
     @field_validator("borr_name", mode="before")
     @classmethod
@@ -241,8 +241,12 @@ def _is_included_naics(naics_code: str | None) -> bool:
 
 
 def _signal_type_for_status(loan_status: str | None) -> str:
-    """Map LoanStatus to signal type. PIF = paid-in-full (strongest signal)."""
-    if loan_status and loan_status.upper() == "PIF":
+    """Map LoanStatus to signal type. PIF = paid-in-full (strongest signal).
+
+    The new SBA CSV format uses 'P I F' (with spaces) instead of 'PIF'.
+    Strip spaces before comparing so both formats are handled.
+    """
+    if loan_status and loan_status.upper().replace(" ", "") == "PIF":
         return "SBA_LOAN_PIF"
     return "SBA_LOAN_ACTIVE"
 
@@ -383,7 +387,7 @@ class SBALoansConnector:
             self.source_run.quarantine_count += 1
             self._log.warning(
                 "sba_validation_failure",
-                company=raw_row.get("BorrName"),
+                company=raw_row.get("borrname"),
                 error=str(exc),
             )
             return

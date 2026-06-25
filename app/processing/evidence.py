@@ -46,7 +46,7 @@ _FRESHNESS_WINDOW_DAYS = 180
 # SBA loans span up to 4+ years of history (filter: 2022-01-01+).
 # Use a longer freshness window so older loans still exceed the 0.1 Gate 3 floor.
 _SBA_FRESHNESS_WINDOW_DAYS = 1825  # 5 years
-_SBA_SOURCE_URL = "https://data.sba.gov/dataset/7-a-504-foia"
+_SBA_SOURCE_URL = "https://data.sba.gov/en/dataset/0ff8e8e9-b967-4f4e-987c-6ac78c575087"
 
 
 def _parse_date(value: object) -> date | None:

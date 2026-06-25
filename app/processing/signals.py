@@ -153,7 +153,7 @@ def detect_signals_for_evidence(evidence_id: UUID, db: Session) -> list[Signal]:
 
     log.info(
         "signal_created",
-        signal_type=_CLAIM_CONTRACT_AWARD,
+        signal_type=signal.signal_type,
         signal_strength=strength,
         award_amount=str(award_amount),
     )
