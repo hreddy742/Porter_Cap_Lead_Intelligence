@@ -22,11 +22,13 @@ export default function TopBar() {
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 7, fontSize: 12, color: "#A1A1AA" }}>
-        <span>Workspace</span>
-        <span style={{ color: "#D4D4D8" }}>/</span>
-        <span>Sales Ops</span>
-        <span style={{ color: "#D4D4D8" }}>/</span>
-        <span style={{ color: "#09090B", fontWeight: 500 }}>{lastCrumb}</span>
+        <span style={{ color: isDetail ? "#A1A1AA" : "#09090B", fontWeight: 500 }}>Leads</span>
+        {isDetail && (
+          <>
+            <span style={{ color: "#D4D4D8" }}>/</span>
+            <span style={{ color: "#09090B", fontWeight: 500 }}>Detail</span>
+          </>
+        )}
       </div>
     </div>
   );
