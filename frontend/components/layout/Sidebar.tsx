@@ -1,69 +1,151 @@
 "use client";
 
-import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { LayoutDashboard, Users } from "lucide-react";
-import type { LucideIcon } from "lucide-react";
-
-const NAV: { href: string; label: string; Icon: LucideIcon; exact?: boolean }[] = [
-  { href: "/", label: "Dashboard", Icon: LayoutDashboard, exact: true },
-  { href: "/leads", label: "Lead Review", Icon: Users },
-];
+import Link from "next/link";
 
 export default function Sidebar() {
   const pathname = usePathname();
+  const active = pathname.startsWith("/leads");
 
   return (
-    <aside className="w-[220px] shrink-0 flex flex-col bg-slate-950 border-r border-slate-800/60">
+    <aside
+      style={{
+        width: 224,
+        flexShrink: 0,
+        background: "#09090B",
+        color: "#FAFAFA",
+        display: "flex",
+        flexDirection: "column",
+        height: "100vh",
+        position: "sticky",
+        top: 0,
+        overflowY: "auto",
+      }}
+    >
       {/* Brand */}
-      <div className="px-4 pt-5 pb-4 border-b border-slate-800/60">
-        <div className="flex items-center gap-2.5">
-          <div className="w-7 h-7 rounded-md bg-blue-600 flex items-center justify-center shrink-0">
-            <span className="text-[11px] font-bold text-white tracking-tight">PC</span>
-          </div>
-          <div className="min-w-0">
-            <p className="text-[10px] font-semibold tracking-[0.14em] text-slate-500 uppercase leading-none">
-              Porter Capital
-            </p>
-            <p className="text-[13px] font-semibold text-white leading-snug mt-0.5">
-              Lead Intelligence
-            </p>
-          </div>
+      <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "18px 18px 16px" }}>
+        <div
+          style={{
+            width: 30,
+            height: 30,
+            flexShrink: 0,
+            borderRadius: 7,
+            background: "#FAFAFA",
+            color: "#09090B",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            fontSize: 12,
+            fontWeight: 700,
+            letterSpacing: "0.02em",
+          }}
+        >
+          PC
+        </div>
+        <div style={{ minWidth: 0 }}>
+          <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.1 }}>Porter Capital</div>
+          <div style={{ fontSize: 10, color: "rgba(250,250,250,0.42)", marginTop: 2 }}>Birmingham · AL</div>
         </div>
       </div>
 
-      {/* Nav */}
-      <nav className="flex-1 px-2.5 py-3 space-y-0.5">
-        {NAV.map(({ href, label, Icon, exact }) => {
-          const active = exact ? pathname === href : pathname.startsWith(href);
-          return (
-            <Link
-              key={href}
-              href={href}
-              className={`flex items-center gap-2.5 px-3 py-[7px] rounded-md text-[13px] transition-colors ${
-                active
-                  ? "bg-blue-600/[0.13] text-blue-400 font-medium"
-                  : "text-slate-400 hover:bg-slate-800/70 hover:text-slate-100"
-              }`}
-            >
-              <Icon
-                className={`w-[15px] h-[15px] shrink-0 ${
-                  active ? "text-blue-400" : "text-slate-600"
-                }`}
-              />
-              {label}
-            </Link>
-          );
-        })}
-      </nav>
+      <div style={{ height: "0.5px", background: "rgba(250,250,250,0.10)", margin: "0 18px" }} />
 
-      {/* Footer */}
-      <div className="px-4 py-3.5 border-t border-slate-800/60">
-        <p className="text-[10px] text-slate-600 leading-relaxed">
-          Internal research tool.
-          <br />
-          Human review required before outreach.
-        </p>
+      {/* Nav */}
+      <div style={{ padding: "14px 12px 4px" }}>
+        <nav style={{ display: "flex", flexDirection: "column", gap: 1 }}>
+          <Link
+            href="/leads"
+            style={{
+              display: "flex",
+              alignItems: "center",
+              gap: 9,
+              padding: "7px 8px",
+              borderRadius: 6,
+              fontSize: 12,
+              fontWeight: 500,
+              cursor: "pointer",
+              textDecoration: "none",
+              background: active ? "#FAFAFA" : "transparent",
+              color: active ? "#09090B" : "rgba(250,250,250,0.55)",
+              transition: "background 0.1s",
+            }}
+          >
+            <span
+              style={{
+                width: 5,
+                height: 5,
+                borderRadius: "50%",
+                background: active ? "#09090B" : "rgba(250,250,250,0.30)",
+                flexShrink: 0,
+              }}
+            />
+            <span style={{ flex: 1 }}>Leads</span>
+          </Link>
+        </nav>
+      </div>
+
+      {/* Bottom */}
+      <div style={{ marginTop: "auto", padding: "12px 18px 16px" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 7,
+            fontSize: 10,
+            color: "rgba(250,250,250,0.42)",
+            marginBottom: 12,
+          }}
+        >
+          <span
+            style={{
+              width: 6,
+              height: 6,
+              borderRadius: "50%",
+              background: "#16A34A",
+              flexShrink: 0,
+            }}
+          />
+          Feed synced daily ·{" "}
+          <span style={{ fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)" }}>
+            SAM.gov
+          </span>
+        </div>
+        <div style={{ height: "0.5px", background: "rgba(250,250,250,0.10)", marginBottom: 12 }} />
+        <div style={{ display: "flex", alignItems: "center", gap: 10, paddingTop: 2 }}>
+          <div
+            style={{
+              width: 28,
+              height: 28,
+              flexShrink: 0,
+              borderRadius: "50%",
+              background: "rgba(250,250,250,0.10)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 11,
+              fontWeight: 600,
+              color: "#FAFAFA",
+            }}
+          >
+            HR
+          </div>
+          <div style={{ minWidth: 0, flex: 1 }}>
+            <div style={{ fontSize: 12, fontWeight: 500, lineHeight: 1.1 }}>Harsha Reddy</div>
+            <div style={{ fontSize: 10, color: "rgba(250,250,250,0.42)", marginTop: 2 }}>
+              Lead Engineer
+            </div>
+          </div>
+          <div
+            style={{
+              fontSize: 9,
+              color: "rgba(250,250,250,0.30)",
+              marginTop: 8,
+              alignSelf: "flex-start",
+            }}
+          >
+            Research only
+          </div>
+        </div>
       </div>
     </aside>
   );

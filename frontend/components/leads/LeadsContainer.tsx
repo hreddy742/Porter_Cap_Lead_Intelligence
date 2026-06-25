@@ -139,7 +139,7 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void 
 // ── Grid column template ───────────────────────────────────────────────────────
 
 const GRID_COLS =
-  "26px minmax(200px,1.7fr) 80px 88px 72px minmax(160px,1.2fr) 92px 130px 96px 100px";
+  "minmax(200px,1.7fr) 80px 88px 72px minmax(160px,1.2fr) 92px 130px 96px 100px";
 
 // ── Main component ─────────────────────────────────────────────────────────────
 
@@ -338,10 +338,6 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
               </button>
             ))}
           </div>
-          <div style={{ fontSize: 11, color: "#71717A" }}>
-            Sort <span style={{ color: "#09090B", fontWeight: 500 }}>Score</span>{" "}
-            <span style={{ color: "#A1A1AA" }}>▾</span>
-          </div>
         </div>
       </div>
 
@@ -369,7 +365,6 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
                 borderBottom: "0.5px solid #E4E4E7",
               }}
             >
-              <div />
               {[
                 "Company",
                 "Score",
@@ -433,45 +428,19 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
         </div>
       </div>
 
-      {/* Keyboard hints */}
+      {/* Count footer */}
       <div
         style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 12,
           padding: "12px 26px 20px",
           flexShrink: 0,
+          fontSize: 11,
+          color: "#A1A1AA",
+          fontVariantNumeric: "tabular-nums",
+          textAlign: "right",
         }}
       >
-        <div style={{ display: "flex", alignItems: "center", gap: 14, fontSize: 11, color: "#A1A1AA" }}>
-          {[
-            { key: "↑↓", label: "navigate" },
-            { key: "⏎", label: "open" },
-            { key: "Space", label: "select" },
-            { key: "⌘K", label: "command" },
-          ].map(({ key, label }) => (
-            <span key={key} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
-              <span
-                style={{
-                  fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
-                  fontSize: 10,
-                  padding: "1px 6px",
-                  borderRadius: 4,
-                  background: "#F4F4F5",
-                  color: "#71717A",
-                }}
-              >
-                {key}
-              </span>
-              {label}
-            </span>
-          ))}
-        </div>
-        <div style={{ fontSize: 11, color: "#A1A1AA", fontVariantNumeric: "tabular-nums" }}>
-          Showing 1–{Math.min(filtered.length, 2000).toLocaleString()} of{" "}
-          {total.toLocaleString()} leads
-        </div>
+        Showing 1–{Math.min(filtered.length, 2000).toLocaleString()} of{" "}
+        {total.toLocaleString()} leads
       </div>
     </div>
   );
@@ -509,7 +478,7 @@ function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, pal, initials }: 
         style={{
           display: "grid",
           gridTemplateColumns:
-            "26px minmax(200px,1.7fr) 80px 88px 72px minmax(160px,1.2fr) 92px 130px 96px 100px",
+            "minmax(200px,1.7fr) 80px 88px 72px minmax(160px,1.2fr) 92px 130px 96px 100px",
           alignItems: "center",
           padding: "0 16px",
           minHeight: rowH,
@@ -519,20 +488,6 @@ function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, pal, initials }: 
           transition: "background 0.1s",
         }}
       >
-        {/* Checkbox */}
-        <div>
-          <span
-            style={{
-              display: "block",
-              width: 14,
-              height: 14,
-              border: "1px solid #D4D4D8",
-              borderRadius: 3,
-              background: "#FFFFFF",
-            }}
-          />
-        </div>
-
         {/* Company */}
         <div
           style={{
