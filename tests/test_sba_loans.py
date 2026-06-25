@@ -67,19 +67,23 @@ def _make_session(*, record_exists: bool = False) -> MagicMock:
 
 
 def _valid_row(**overrides) -> dict:
-    """Minimal valid SBA CSV row that passes all filters."""
+    """Minimal valid SBA CSV row that passes all filters.
+
+    Uses lowercase column names matching the current SBA FOIA CSV format.
+    Loan status 'P I F' (with spaces) is the new format for paid-in-full.
+    """
     base = {
-        "BorrName": "Acme Manufacturing LLC",
-        "BorrStreet": "123 Main St",
-        "BorrCity": "Birmingham",
-        "BorrState": "AL",
-        "BorrZip": "35201",
-        "NaicsCode": "332312",
-        "NaicsDescription": "Fabricated Structural Metal Manufacturing",
-        "GrossApproval": "500000",
-        "ApprovalDate": "2023-06-15",
-        "LoanStatus": "PIF",
-        "JobsSupported": "25",
+        "borrname": "Acme Manufacturing LLC",
+        "borrstreet": "123 Main St",
+        "borrcity": "Birmingham",
+        "borrstate": "AL",
+        "borrzip": "35201",
+        "naicscode": "332312",
+        "naicsdescription": "Fabricated Structural Metal Manufacturing",
+        "grossapproval": "500000",
+        "approvaldate": "2023-06-15",
+        "loanstatus": "P I F",
+        "jobssupported": "25",
     }
     base.update(overrides)
     return base
@@ -113,7 +117,7 @@ def _run_connector(
         writer.writerows(rows)
         csv_content = buf.getvalue()
     else:
-        csv_content = "BorrName,BorrState,GrossApproval,ApprovalDate,LoanStatus\n"
+        csv_content = "borrname,borrstate,grossapproval,approvaldate,loanstatus\n"
 
     env_patch = {"SBA_LOANS_TEST_LIMIT": "0", "SBA_CACHE_PATH": "/fake/cache.csv"}
     if env:
@@ -135,53 +139,53 @@ def _run_connector(
 
 def test_restaurant_naics_excluded():
     """NAICS 722511 (Restaurants) must be excluded — pure B2C."""
-    source_run, _ = _run_connector([_valid_row(NaicsCode="722511", NaicsDescription="Restaurants")])
+    source_run, _ = _run_connector([_valid_row(naicscode="722511", naicsdescription="Restaurants")])
     assert source_run.records_skipped == 1
     assert source_run.records_valid == 0
 
 
 def test_hotel_naics_excluded():
     """NAICS 721110 (Hotels) must be excluded — pure B2C."""
-    source_run, _ = _run_connector([_valid_row(NaicsCode="721110", NaicsDescription="Hotels")])
+    source_run, _ = _run_connector([_valid_row(naicscode="721110", naicsdescription="Hotels")])
     assert source_run.records_skipped == 1
     assert source_run.records_valid == 0
 
 
 def test_retail_naics_excluded():
     """NAICS 441110 (New Car Dealers) must be excluded — Retail Trade (44)."""
-    source_run, _ = _run_connector([_valid_row(NaicsCode="441110")])
+    source_run, _ = _run_connector([_valid_row(naicscode="441110")])
     assert source_run.records_skipped == 1
     assert source_run.records_valid == 0
 
 
 def test_manufacturing_naics_included():
     """NAICS 332312 (Manufacturing) must be included — B2B sector 33."""
-    source_run, _ = _run_connector([_valid_row(NaicsCode="332312")])
+    source_run, _ = _run_connector([_valid_row(naicscode="332312")])
     assert source_run.records_valid == 1
     assert source_run.records_skipped == 0
 
 
 def test_staffing_naics_included():
     """NAICS 561320 (Staffing) must be included — B2B sector 56."""
-    source_run, _ = _run_connector([_valid_row(NaicsCode="561320")])
+    source_run, _ = _run_connector([_valid_row(naicscode="561320")])
     assert source_run.records_valid == 1
 
 
 def test_wholesale_naics_included():
     """NAICS 423990 (Wholesale) must be included — B2B sector 42."""
-    source_run, _ = _run_connector([_valid_row(NaicsCode="423990")])
+    source_run, _ = _run_connector([_valid_row(naicscode="423990")])
     assert source_run.records_valid == 1
 
 
 def test_healthcare_naics_included():
     """NAICS 621111 (Healthcare) must be included — B2B medical sector 62."""
-    source_run, _ = _run_connector([_valid_row(NaicsCode="621111")])
+    source_run, _ = _run_connector([_valid_row(naicscode="621111")])
     assert source_run.records_valid == 1
 
 
 def test_construction_naics_included():
     """NAICS 238210 (Electrical Contractors) must be included — Construction sector 23."""
-    source_run, _ = _run_connector([_valid_row(NaicsCode="238210")])
+    source_run, _ = _run_connector([_valid_row(naicscode="238210")])
     assert source_run.records_valid == 1
 
 
@@ -190,21 +194,21 @@ def test_construction_naics_included():
 
 def test_state_ny_excluded():
     """State NY must be excluded — not in Porter's geographic ICP."""
-    source_run, _ = _run_connector([_valid_row(BorrState="NY")])
+    source_run, _ = _run_connector([_valid_row(borrstate="NY")])
     assert source_run.records_skipped == 1
     assert source_run.records_valid == 0
 
 
 def test_state_al_included():
     """State AL must be included — in Porter's geographic ICP."""
-    source_run, _ = _run_connector([_valid_row(BorrState="AL")])
+    source_run, _ = _run_connector([_valid_row(borrstate="AL")])
     assert source_run.records_valid == 1
 
 
 def test_all_target_states_included():
     """All seven target states must pass the state filter."""
     for state in ("AL", "GA", "TN", "FL", "MS", "TX", "VA"):
-        source_run, _ = _run_connector([_valid_row(BorrState=state)])
+        source_run, _ = _run_connector([_valid_row(borrstate=state)])
         assert source_run.records_valid == 1, f"State {state} should be included"
 
 
@@ -213,33 +217,33 @@ def test_all_target_states_included():
 
 def test_amount_below_minimum_excluded():
     """Loan amount $30,000 must be excluded — below $50K minimum."""
-    source_run, _ = _run_connector([_valid_row(GrossApproval="30000")])
+    source_run, _ = _run_connector([_valid_row(grossapproval="30000")])
     assert source_run.records_skipped == 1
     assert source_run.records_valid == 0
 
 
 def test_amount_above_maximum_excluded():
     """Loan amount $6,000,000 must be excluded — above $5M maximum."""
-    source_run, _ = _run_connector([_valid_row(GrossApproval="6000000")])
+    source_run, _ = _run_connector([_valid_row(grossapproval="6000000")])
     assert source_run.records_skipped == 1
     assert source_run.records_valid == 0
 
 
 def test_amount_500k_included():
     """Loan amount $500,000 must be included — within $50K–$5M range."""
-    source_run, _ = _run_connector([_valid_row(GrossApproval="500000")])
+    source_run, _ = _run_connector([_valid_row(grossapproval="500000")])
     assert source_run.records_valid == 1
 
 
 def test_amount_50k_boundary_included():
     """Loan amount exactly $50,000 must be included — at minimum boundary."""
-    source_run, _ = _run_connector([_valid_row(GrossApproval="50000")])
+    source_run, _ = _run_connector([_valid_row(grossapproval="50000")])
     assert source_run.records_valid == 1
 
 
 def test_amount_5m_boundary_included():
     """Loan amount exactly $5,000,000 must be included — at maximum boundary."""
-    source_run, _ = _run_connector([_valid_row(GrossApproval="5000000")])
+    source_run, _ = _run_connector([_valid_row(grossapproval="5000000")])
     assert source_run.records_valid == 1
 
 
@@ -248,21 +252,29 @@ def test_amount_5m_boundary_included():
 
 def test_chgoff_status_excluded():
     """LoanStatus CHGOFF (charged off/defaulted) must be excluded."""
-    source_run, _ = _run_connector([_valid_row(LoanStatus="CHGOFF")])
+    source_run, _ = _run_connector([_valid_row(loanstatus="CHGOFF")])
     assert source_run.records_skipped == 1
     assert source_run.records_valid == 0
 
 
 def test_cancld_status_excluded():
     """LoanStatus CANCLD (cancelled) must be excluded."""
-    source_run, _ = _run_connector([_valid_row(LoanStatus="CANCLD")])
+    source_run, _ = _run_connector([_valid_row(loanstatus="CANCLD")])
     assert source_run.records_skipped == 1
     assert source_run.records_valid == 0
 
 
 def test_pif_status_produces_sba_loan_pif_signal():
-    """LoanStatus PIF must produce signal_type SBA_LOAN_PIF in the stored payload."""
-    source_run, session = _run_connector([_valid_row(LoanStatus="PIF")])
+    """LoanStatus 'P I F' (new CSV format with spaces) must produce SBA_LOAN_PIF payload."""
+    source_run, session = _run_connector([_valid_row(loanstatus="P I F")])
+    assert source_run.records_valid == 1
+    added = session.add.call_args[0][0]
+    assert added.payload["sba_signal_type"] == "SBA_LOAN_PIF"
+
+
+def test_pif_status_old_format_still_works():
+    """LoanStatus 'PIF' (old format without spaces) must also produce SBA_LOAN_PIF."""
+    source_run, session = _run_connector([_valid_row(loanstatus="PIF")])
     assert source_run.records_valid == 1
     added = session.add.call_args[0][0]
     assert added.payload["sba_signal_type"] == "SBA_LOAN_PIF"
@@ -270,7 +282,7 @@ def test_pif_status_produces_sba_loan_pif_signal():
 
 def test_blank_loan_status_produces_sba_loan_active_signal():
     """Blank LoanStatus (active loan) must produce signal_type SBA_LOAN_ACTIVE."""
-    source_run, session = _run_connector([_valid_row(LoanStatus="")])
+    source_run, session = _run_connector([_valid_row(loanstatus="")])
     assert source_run.records_valid == 1
     added = session.add.call_args[0][0]
     assert added.payload["sba_signal_type"] == "SBA_LOAN_ACTIVE"
@@ -281,20 +293,20 @@ def test_blank_loan_status_produces_sba_loan_active_signal():
 
 def test_approval_date_2019_excluded():
     """ApprovalDate in 2019 must be excluded — before 2022-01-01 cutoff."""
-    source_run, _ = _run_connector([_valid_row(ApprovalDate="2019-06-15")])
+    source_run, _ = _run_connector([_valid_row(approvaldate="2019-06-15")])
     assert source_run.records_skipped == 1
     assert source_run.records_valid == 0
 
 
 def test_approval_date_2023_included():
     """ApprovalDate in 2023 must be included — after 2022-01-01 cutoff."""
-    source_run, _ = _run_connector([_valid_row(ApprovalDate="2023-06-15")])
+    source_run, _ = _run_connector([_valid_row(approvaldate="2023-06-15")])
     assert source_run.records_valid == 1
 
 
 def test_approval_date_2022_01_01_boundary_included():
     """ApprovalDate exactly 2022-01-01 must be included — at cutoff boundary."""
-    source_run, _ = _run_connector([_valid_row(ApprovalDate="2022-01-01")])
+    source_run, _ = _run_connector([_valid_row(approvaldate="2022-01-01")])
     assert source_run.records_valid == 1
 
 
@@ -668,19 +680,19 @@ def test_record_model_valid_payload():
     assert record.borr_state == "AL"
     assert record.gross_approval == Decimal("500000")
     assert record.approval_date == date(2023, 6, 15)
-    assert record.loan_status == "PIF"
+    assert record.loan_status == "P I F"
 
 
 def test_record_model_strips_whitespace_from_name():
     """Leading/trailing whitespace in BorrName must be stripped."""
-    raw = _valid_row(BorrName="  Test Corp  ")
+    raw = _valid_row(borrname="  Test Corp  ")
     record = SBALoanRecord.model_validate(raw)
     assert record.borr_name == "Test Corp"
 
 
 def test_record_model_normalizes_state_to_uppercase():
     """State code must be uppercased."""
-    raw = _valid_row(BorrState="al")
+    raw = _valid_row(borrstate="al")
     record = SBALoanRecord.model_validate(raw)
     assert record.borr_state == "AL"
 
@@ -688,44 +700,44 @@ def test_record_model_normalizes_state_to_uppercase():
 def test_record_model_rejects_empty_borr_name():
     """Empty BorrName must raise ValidationError."""
     with pytest.raises(ValidationError):
-        SBALoanRecord.model_validate(_valid_row(BorrName=""))
+        SBALoanRecord.model_validate(_valid_row(borrname=""))
 
 
 def test_record_model_rejects_zero_amount():
-    """GrossApproval=0 must raise ValidationError."""
+    """grossapproval=0 must raise ValidationError."""
     with pytest.raises(ValidationError):
-        SBALoanRecord.model_validate(_valid_row(GrossApproval="0"))
+        SBALoanRecord.model_validate(_valid_row(grossapproval="0"))
 
 
 def test_record_model_rejects_negative_amount():
     """GrossApproval < 0 must raise ValidationError."""
     with pytest.raises(ValidationError):
-        SBALoanRecord.model_validate(_valid_row(GrossApproval="-50000"))
+        SBALoanRecord.model_validate(_valid_row(grossapproval="-50000"))
 
 
 def test_record_model_rejects_unparseable_date():
     """Unparseable ApprovalDate must raise ValidationError."""
     with pytest.raises(ValidationError):
-        SBALoanRecord.model_validate(_valid_row(ApprovalDate="not-a-date"))
+        SBALoanRecord.model_validate(_valid_row(approvaldate="not-a-date"))
 
 
 def test_record_model_parses_slash_date_format():
     """ApprovalDate in MM/DD/YYYY format must parse correctly."""
-    raw = _valid_row(ApprovalDate="06/15/2023")
+    raw = _valid_row(approvaldate="06/15/2023")
     record = SBALoanRecord.model_validate(raw)
     assert record.approval_date == date(2023, 6, 15)
 
 
 def test_record_model_jobs_supported_parses_float_string():
-    """JobsSupported='10.0' (common in CSV) must parse to int 10."""
-    raw = _valid_row(JobsSupported="10.0")
+    """jobssupported='10.0' (common in CSV) must parse to int 10."""
+    raw = _valid_row(jobssupported="10.0")
     record = SBALoanRecord.model_validate(raw)
     assert record.jobs_supported == 10
 
 
 def test_record_model_jobs_supported_none_when_blank():
     """Blank JobsSupported must produce None."""
-    raw = _valid_row(JobsSupported="")
+    raw = _valid_row(jobssupported="")
     record = SBALoanRecord.model_validate(raw)
     assert record.jobs_supported is None
 
@@ -759,8 +771,13 @@ def test_is_included_naics_empty_returns_false():
 
 
 def test_signal_type_pif():
-    """LoanStatus 'PIF' must map to SBA_LOAN_PIF."""
+    """LoanStatus 'PIF' (old format) must map to SBA_LOAN_PIF."""
     assert _signal_type_for_status("PIF") == "SBA_LOAN_PIF"
+
+
+def test_signal_type_pif_with_spaces():
+    """LoanStatus 'P I F' (new SBA CSV format) must map to SBA_LOAN_PIF."""
+    assert _signal_type_for_status("P I F") == "SBA_LOAN_PIF"
 
 
 def test_signal_type_active_blank():
@@ -778,7 +795,7 @@ def test_signal_type_active_none():
 
 def test_test_limit_stops_processing_early():
     """SBA_LOANS_TEST_LIMIT=2 must stop after processing 2 rows from a 5-row file."""
-    rows = [_valid_row(BorrName=f"Company {i}") for i in range(5)]
+    rows = [_valid_row(borrname=f"Company {i}") for i in range(5)]
     source_run, _ = _run_connector(rows, env={"SBA_LOANS_TEST_LIMIT": "2"})
     assert source_run.records_fetched == 2
 
