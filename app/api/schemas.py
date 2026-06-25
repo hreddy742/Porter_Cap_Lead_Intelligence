@@ -52,6 +52,10 @@ class LeadListItemSchema(BaseModel):
     updated_at: str
     sector_excluded: bool = False
     sector_excluded_reason: str | None = None
+    company_naics: str | None = None
+    company_naics_description: str | None = None
+    company_state: str | None = None
+    awarding_agency: str | None = None
 
 
 class LeadsListResponse(BaseModel):

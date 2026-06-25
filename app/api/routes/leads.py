@@ -19,7 +19,7 @@ from app.dashboard.review import (
     get_latest_run_context,
     list_leads_filtered,
 )
-from app.db.models import Signal
+from app.db.models import EvidenceItem, Signal
 from app.db.session import get_session
 
 router = APIRouter()
@@ -51,6 +51,7 @@ def list_leads(
     limit: int = 50,
     offset: int = 0,
     include_excluded: bool = False,
+    signal_type: str | None = None,
     db: Session = Depends(get_session),
 ) -> LeadsListResponse:
     parsed_source_id: UUID | None = None
@@ -76,6 +77,7 @@ def list_leads(
         sort_by=sort_by,
         latest_run_started_at=latest_run_started_at,
         include_excluded=include_excluded,
+        signal_type=signal_type,
     )
 
     total = len(rows)
@@ -99,6 +101,24 @@ def list_leads(
             if sig.company_id not in dominant_signal:
                 dominant_signal[sig.company_id] = sig.signal_type
 
+    # Batch-fetch awarding_agency from most recent evidence for companies on this page.
+    awarding_agency_by_company: dict = {}
+    if company_ids:
+        ev_rows = (
+            db.query(EvidenceItem.company_id, EvidenceItem.extracted_fields)
+            .filter(
+                EvidenceItem.company_id.in_(company_ids),
+                EvidenceItem.extracted_fields.isnot(None),
+            )
+            .order_by(EvidenceItem.captured_at.desc())
+            .all()
+        )
+        for ev in ev_rows:
+            if ev.company_id not in awarding_agency_by_company:
+                agency = (ev.extracted_fields or {}).get("awarding_agency")
+                if agency:
+                    awarding_agency_by_company[ev.company_id] = agency
+
     items = [
         LeadListItemSchema(
             lead_id=str(r["lead"].id),
@@ -118,6 +138,10 @@ def list_leads(
             updated_at=str(r["lead"].updated_at),
             sector_excluded=bool(r["lead"].sector_excluded),
             sector_excluded_reason=r["lead"].sector_excluded_reason,
+            company_naics=r["company"].naics_code if r["company"] else None,
+            company_naics_description=r["company"].naics_description if r["company"] else None,
+            company_state=r["company"].state if r["company"] else None,
+            awarding_agency=awarding_agency_by_company.get(r["lead"].company_id),
         )
         for r in page_rows
     ]

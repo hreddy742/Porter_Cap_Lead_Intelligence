@@ -407,3 +407,306 @@ class TestSectorExcludedField:
         assert "sector_excluded_reason" in match
         assert match["sector_excluded"] is False
         assert match["sector_excluded_reason"] is None
+
+
+# ── signal_type filter (Bug 1 fix) ────────────────────────────────────────────
+
+
+@pytest.mark.db
+class TestSignalTypeFilter:
+    """?signal_type= filters leads to only those whose company has that signal type."""
+
+    def _make_company_with_signal(self, db_session, name, ext_id, signal_type_val):
+        import uuid as uuid_mod
+        from datetime import date
+        from app.db.models import (
+            Company,
+            EvidenceItem,
+            LeadCandidate,
+            PipelineRun,
+            RawSourceEvent,
+            Signal,
+            SourceRegistry,
+            SourceRun,
+        )
+
+        # Source registry — create one per call to avoid unique-name collisions.
+        source = SourceRegistry(
+            id=uuid_mod.uuid4(),
+            name=f"test-src-{ext_id}",
+            category="government",
+            access_method="api",
+            status="enabled",
+            enabled=True,
+            cost_type="free",
+            legal_notes="test",
+        )
+        db_session.add(source)
+        db_session.flush()
+
+        # Pipeline run (completed so no single-running uniqueness conflict).
+        pipeline_run = PipelineRun(
+            id=uuid_mod.uuid4(),
+            status="completed",
+            trigger="test",
+        )
+        db_session.add(pipeline_run)
+        db_session.flush()
+
+        # Source run tied to pipeline.
+        source_run = SourceRun(
+            id=uuid_mod.uuid4(),
+            pipeline_run_id=pipeline_run.id,
+            source_id=source.id,
+            status="completed",
+        )
+        db_session.add(source_run)
+        db_session.flush()
+
+        company = Company(
+            id=uuid_mod.uuid4(),
+            canonical_name=name,
+            normalized_name=name.lower(),
+            external_id=ext_id,
+            country="US",
+        )
+        db_session.add(company)
+        db_session.flush()
+
+        raw_event = RawSourceEvent(
+            id=uuid_mod.uuid4(),
+            source_id=source.id,
+            source_run_id=source_run.id,
+            payload={"test": True},
+            content_hash=ext_id + "hash",
+        )
+        db_session.add(raw_event)
+        db_session.flush()
+
+        ev = EvidenceItem(
+            id=uuid_mod.uuid4(),
+            raw_event_id=raw_event.id,
+            source_id=source.id,
+            company_id=company.id,
+            source_url="https://example.com",
+            content_hash=ext_id + "evhash",
+            claim_supported=signal_type_val,
+            confidence_score="0.9",
+            freshness_score="0.9",
+        )
+        db_session.add(ev)
+        db_session.flush()
+
+        signal = Signal(
+            id=uuid_mod.uuid4(),
+            company_id=company.id,
+            source_id=source.id,
+            evidence_id=ev.id,
+            signal_type=signal_type_val,
+            signal_date=date(2026, 6, 1),
+            signal_strength="strong",
+            freshness_score="0.9",
+        )
+        db_session.add(signal)
+        db_session.flush()
+
+        lead = LeadCandidate(
+            id=uuid_mod.uuid4(),
+            company_id=company.id,
+            status="active",
+            tier="warm",
+            current_score=60,
+            sales_status="research",
+        )
+        db_session.add(lead)
+        db_session.flush()
+        return company.canonical_name
+
+    def test_signal_type_param_accepted(self, client):
+        r = client.get("/api/leads?signal_type=CONTRACT_AWARD")
+        assert r.status_code == 200
+
+    def test_signal_type_subcontract_accepted(self, client):
+        r = client.get("/api/leads?signal_type=SUBCONTRACT_AWARD")
+        assert r.status_code == 200
+
+    @pytest.mark.db
+    def test_subcontract_filter_excludes_contract_leads(self, client, db_session):
+        """?signal_type=SUBCONTRACT_AWARD must not return a lead whose only signal is CONTRACT_AWARD."""
+        self._make_company_with_signal(
+            db_session, "Prime Only Corp", "primeonly001234", "CONTRACT_AWARD"
+        )
+        r = client.get("/api/leads?signal_type=SUBCONTRACT_AWARD&include_excluded=true")
+        assert r.status_code == 200
+        names = [i["company_name"] for i in r.json()["items"]]
+        assert "Prime Only Corp" not in names
+
+    @pytest.mark.db
+    def test_contract_filter_excludes_subcontract_leads(self, client, db_session):
+        """?signal_type=CONTRACT_AWARD must not return a lead whose only signal is SUBCONTRACT_AWARD."""
+        self._make_company_with_signal(
+            db_session, "Sub Only Corp", "subonly0012345", "SUBCONTRACT_AWARD"
+        )
+        r = client.get("/api/leads?signal_type=CONTRACT_AWARD&include_excluded=true")
+        assert r.status_code == 200
+        names = [i["company_name"] for i in r.json()["items"]]
+        assert "Sub Only Corp" not in names
+
+    @pytest.mark.db
+    def test_subcontract_filter_returns_subcontract_leads(self, client, db_session):
+        """?signal_type=SUBCONTRACT_AWARD returns a lead whose company has SUBCONTRACT_AWARD signal."""
+        self._make_company_with_signal(
+            db_session, "Sub Award Corp", "subaward012345", "SUBCONTRACT_AWARD"
+        )
+        r = client.get("/api/leads?signal_type=SUBCONTRACT_AWARD&include_excluded=true")
+        assert r.status_code == 200
+        names = [i["company_name"] for i in r.json()["items"]]
+        assert "Sub Award Corp" in names
+
+
+# ── company_naics / awarding_agency in list response (Bug 4 fix) ──────────────
+
+
+class TestListResponseEnrichedFields:
+    """company_naics, company_naics_description, company_state, awarding_agency
+    are present in the schema and returned by the API."""
+
+    def test_schema_has_company_naics(self):
+        from app.api.schemas import LeadListItemSchema
+        assert "company_naics" in LeadListItemSchema.model_fields
+
+    def test_schema_has_company_naics_description(self):
+        from app.api.schemas import LeadListItemSchema
+        assert "company_naics_description" in LeadListItemSchema.model_fields
+
+    def test_schema_has_company_state(self):
+        from app.api.schemas import LeadListItemSchema
+        assert "company_state" in LeadListItemSchema.model_fields
+
+    def test_schema_has_awarding_agency(self):
+        from app.api.schemas import LeadListItemSchema
+        assert "awarding_agency" in LeadListItemSchema.model_fields
+
+    def test_enriched_fields_default_none(self):
+        from app.api.schemas import LeadListItemSchema
+        item = LeadListItemSchema(
+            lead_id="00000000-0000-0000-0000-000000000001",
+            company_id="00000000-0000-0000-0000-000000000002",
+            company_name="Test Co",
+            tier="warm",
+            score=60,
+            sales_status="research",
+            primary_source="usaspending",
+            latest_signal_date=None,
+            max_award_amount=None,
+            is_new_in_run=False,
+            created_at="2026-01-01T00:00:00",
+            updated_at="2026-01-01T00:00:00",
+        )
+        assert item.company_naics is None
+        assert item.company_naics_description is None
+        assert item.company_state is None
+        assert item.awarding_agency is None
+
+    @pytest.mark.db
+    def test_company_naics_returned_in_list_response(self, client, db_session):
+        """Leads list includes company_naics from the Company record."""
+        import uuid as uuid_mod
+        from app.db.models import Company, LeadCandidate
+
+        company = Company(
+            id=uuid_mod.uuid4(),
+            canonical_name="NAICS Field Test Co",
+            normalized_name="naics field test co",
+            external_id="naicstest012345",
+            country="US",
+            naics_code="541511",
+            naics_description="Custom Computer Programming Services",
+            state="VA",
+        )
+        db_session.add(company)
+        db_session.flush()
+
+        lead = LeadCandidate(
+            id=uuid_mod.uuid4(),
+            company_id=company.id,
+            status="active",
+            sales_status="research",
+        )
+        db_session.add(lead)
+        db_session.flush()
+
+        r = client.get("/api/leads")
+        assert r.status_code == 200
+        items = r.json()["items"]
+        match = next((i for i in items if i["company_name"] == "NAICS Field Test Co"), None)
+        assert match is not None, "lead not found in response"
+        assert match["company_naics"] == "541511"
+        assert match["company_naics_description"] == "Custom Computer Programming Services"
+        assert match["company_state"] == "VA"
+
+
+# ── score bar scaling (Bug 3 fix) ─────────────────────────────────────────────
+
+
+class TestScoreBarScaling:
+    """Score bar width formula produces expected percentages at key values."""
+
+    def _bar_pct(self, score):
+        """Replicates the frontend formula: min(100, (score / 73) * 100)."""
+        return min(100, ((score if score is not None else 0) / 73) * 100)
+
+    def test_max_score_fills_bar(self):
+        assert self._bar_pct(73) == pytest.approx(100.0)
+
+    def test_zero_score_empty_bar(self):
+        assert self._bar_pct(0) == pytest.approx(0.0)
+
+    def test_null_score_empty_bar(self):
+        assert self._bar_pct(None) == pytest.approx(0.0)
+
+    def test_mid_score_proportional(self):
+        pct = self._bar_pct(36)
+        assert 48 < pct < 50
+
+
+# ── DOMESTIC AWARDEES suppression (Bug 2 fix) ─────────────────────────────────
+
+
+@pytest.mark.db
+class TestDomesticAwardeesSuppression:
+    """DOMESTIC AWARDEES (UNDISCLOSED) leads must never appear in active lead views."""
+
+    def test_suppressed_lead_absent_from_default_view(self, client, db_session):
+        """A lead with sales_status=suppressed / status=archived must not appear
+        in the default /api/leads response (which includes active+archived)."""
+        import uuid as uuid_mod
+        from app.db.models import Company, LeadCandidate
+
+        company = Company(
+            id=uuid_mod.uuid4(),
+            canonical_name="DOMESTIC AWARDEES (UNDISCLOSED)",
+            normalized_name="domestic awardees undisclosed",
+            external_id="domesawd0012345",
+            country="US",
+        )
+        db_session.add(company)
+        db_session.flush()
+
+        lead = LeadCandidate(
+            id=uuid_mod.uuid4(),
+            company_id=company.id,
+            status="archived",
+            tier="archive",
+            current_score=10,
+            sales_status="suppressed",
+        )
+        db_session.add(lead)
+        db_session.flush()
+
+        r = client.get("/api/leads?include_excluded=true")
+        assert r.status_code == 200
+        names = [i["company_name"] for i in r.json()["items"]]
+        assert "DOMESTIC AWARDEES (UNDISCLOSED)" not in names, (
+            "suppressed DOMESTIC AWARDEES must not appear in active lead views"
+        )

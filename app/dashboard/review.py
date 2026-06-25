@@ -439,6 +439,7 @@ def list_leads_filtered(
     sort_by: str = "score_desc",
     latest_run_started_at: datetime | None = None,
     include_excluded: bool = False,
+    signal_type: str | None = None,
 ) -> list[dict]:
     """Enhanced lead list with view selector, filters, and sorting.
 
@@ -477,6 +478,7 @@ def list_leads_filtered(
         .options(joinedload(LeadCandidate.company))
         .join(Company, LeadCandidate.company_id == Company.id)
         .where(LeadCandidate.status.in_(["active", "archived"]))
+        .where(LeadCandidate.sales_status != "suppressed")
         .where(Company.deleted_at.is_(None))
     )
 
@@ -534,6 +536,10 @@ def list_leads_filtered(
             (LeadCandidate.sector_excluded == False)  # noqa: E712
             | LeadCandidate.sector_excluded.is_(None)
         )
+
+    if signal_type:
+        sig_subq = select(Signal.company_id).where(Signal.signal_type == signal_type)
+        stmt = stmt.where(LeadCandidate.company_id.in_(sig_subq))
 
     # ── SQL-level sorting (for non-signal sorts) ──────────────────────────────
     if sort_by == "newest_first":

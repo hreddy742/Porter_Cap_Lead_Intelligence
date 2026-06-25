@@ -3,30 +3,43 @@
 import { useState, useMemo } from "react";
 import Link from "next/link";
 import type { LeadListItem } from "@/lib/api";
-import { TierBadge } from "@/components/ui/TierBadge";
-import { StatusBadge } from "@/components/ui/StatusBadge";
-import { SourceBadge, SignalTypeBadge } from "@/components/ui/SourceBadge";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorState } from "@/components/ui/ErrorState";
-import { Search, X } from "lucide-react";
+import { StatusBadge } from "@/components/ui/StatusBadge";
 
-type Tab = "all" | "latest_run" | "pending" | "recent";
+// ── Design tokens ──────────────────────────────────────────────────────────────
 
-const TABS: { key: Tab; label: string }[] = [
-  { key: "all", label: "All Active" },
-  { key: "latest_run", label: "Latest Run" },
-  { key: "pending", label: "Pending Review" },
-  { key: "recent", label: "Recently Updated" },
+const TIER_CFG: Record<string, { color: string; bg: string; label: string }> = {
+  hot: { color: "#DC2626", bg: "rgba(220,38,38,0.10)", label: "Hot" },
+  warm: { color: "#D97706", bg: "rgba(217,119,6,0.10)", label: "Warm" },
+  cold: { color: "#2563EB", bg: "rgba(37,99,235,0.10)", label: "Cold" },
+  archive: { color: "#71717A", bg: "rgba(113,113,122,0.10)", label: "Archive" },
+};
+
+const AVATAR_PALETTES = [
+  { bg: "#EFF6FF", text: "#1D4ED8" },
+  { bg: "#FEF3C7", text: "#92400E" },
+  { bg: "#DCFCE7", text: "#166534" },
+  { bg: "#F3E8FF", text: "#6B21A8" },
+  { bg: "#FFEDD5", text: "#C2410C" },
+  { bg: "#E0F2FE", text: "#0C4A6E" },
+  { bg: "#FEE2E2", text: "#991B1B" },
+  { bg: "#F0FDF4", text: "#15803D" },
 ];
 
-const TIERS = ["hot", "warm", "cold", "archive"] as const;
+function avatarPalette(name: string) {
+  let hash = 0;
+  for (let i = 0; i < name.length; i++) {
+    hash = ((hash << 5) - hash + name.charCodeAt(i)) | 0;
+  }
+  return AVATAR_PALETTES[Math.abs(hash) % AVATAR_PALETTES.length];
+}
 
-const SCORE_COLOR: Record<string, string> = {
-  hot: "text-red-600",
-  warm: "text-amber-600",
-  cold: "text-sky-600",
-  archive: "text-slate-400",
-};
+function getInitials(name: string): string {
+  const words = name.replace(/[^a-zA-Z\s]/g, "").trim().split(/\s+/);
+  if (words.length >= 2) return (words[0][0] + words[1][0]).toUpperCase();
+  return name.substring(0, 2).toUpperCase();
+}
 
 function fmtDate(s: string | null): string {
   if (!s) return "—";
@@ -35,11 +48,6 @@ function fmtDate(s: string | null): string {
     day: "numeric",
     year: "numeric",
   });
-}
-
-function fmtScore(n: number | null): string {
-  if (n == null) return "—";
-  return n.toString();
 }
 
 function fmtMoney(s: string | null): string {
@@ -51,52 +59,89 @@ function fmtMoney(s: string | null): string {
   return `$${n.toFixed(0)}`;
 }
 
-function getTabLeads(leads: LeadListItem[], tab: Tab): LeadListItem[] {
-  switch (tab) {
-    case "latest_run":
-      return leads.filter((l) => l.is_new_in_run);
-    case "pending":
-      return leads.filter((l) => l.sales_status === "pending_review");
-    case "recent":
-      return [...leads].sort(
-        (a, b) =>
-          new Date(b.updated_at).getTime() - new Date(a.updated_at).getTime()
-      );
-    default:
-      return leads;
-  }
+function fmtPipelineValue(leads: LeadListItem[]): string {
+  const total = leads.reduce(
+    (s, l) => s + (l.max_award_amount ? parseFloat(l.max_award_amount) : 0),
+    0
+  );
+  if (total >= 1_000_000_000) return `$${(total / 1_000_000_000).toFixed(2)}B`;
+  if (total >= 1_000_000) return `$${(total / 1_000_000).toFixed(2)}M`;
+  return `$${(total / 1_000).toFixed(0)}K`;
 }
 
-function getUniqueSources(leads: LeadListItem[]): string[] {
-  const sources = leads
-    .map((l) => l.primary_source)
-    .filter((s): s is string => Boolean(s));
-  return [...new Set(sources)].sort();
-}
+// ── Chip component ─────────────────────────────────────────────────────────────
 
-function getUniqueStatuses(leads: LeadListItem[]): string[] {
-  return [...new Set(leads.map((l) => l.sales_status))].sort();
-}
-
-interface FilterChipProps {
+function Chip({
+  label,
+  active,
+  onClick,
+}: {
   label: string;
-  onRemove: () => void;
-}
-
-function FilterChip({ label, onRemove }: FilterChipProps) {
+  active: boolean;
+  onClick: () => void;
+}) {
   return (
-    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-blue-50 text-blue-700 text-xs font-medium ring-1 ring-inset ring-blue-600/20">
+    <button
+      onClick={onClick}
+      style={{
+        padding: "4px 10px",
+        borderRadius: 999,
+        fontSize: 11,
+        fontWeight: 500,
+        cursor: "pointer",
+        border: `0.5px solid ${active ? "#09090B" : "#E4E4E7"}`,
+        background: active ? "#09090B" : "transparent",
+        color: active ? "#FAFAFA" : "#71717A",
+        transition: "all 0.1s",
+        outline: "none",
+      }}
+    >
       {label}
-      <button
-        onClick={onRemove}
-        className="hover:text-blue-900 transition-colors ml-0.5"
-        aria-label={`Remove filter: ${label}`}
-      >
-        <X className="w-2.5 h-2.5" />
-      </button>
-    </span>
+    </button>
   );
 }
+
+// ── Toggle switch ──────────────────────────────────────────────────────────────
+
+function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void }) {
+  return (
+    <button
+      onClick={() => onChange(!on)}
+      style={{
+        width: 30,
+        height: 17,
+        borderRadius: 999,
+        background: on ? "#2563EB" : "#E4E4E7",
+        position: "relative",
+        border: "none",
+        cursor: "pointer",
+        transition: "background 0.15s",
+        flexShrink: 0,
+        outline: "none",
+      }}
+    >
+      <span
+        style={{
+          position: "absolute",
+          top: 2,
+          left: on ? 15 : 2,
+          width: 13,
+          height: 13,
+          borderRadius: "50%",
+          background: "#FFFFFF",
+          transition: "left 0.15s",
+        }}
+      />
+    </button>
+  );
+}
+
+// ── Grid column template ───────────────────────────────────────────────────────
+
+const GRID_COLS =
+  "26px minmax(200px,1.7fr) 80px 88px 72px minmax(160px,1.2fr) 92px 130px 96px 100px";
+
+// ── Main component ─────────────────────────────────────────────────────────────
 
 interface Props {
   leads: LeadListItem[];
@@ -105,341 +150,640 @@ interface Props {
 }
 
 export default function LeadsContainer({ leads, total, fetchError }: Props) {
-  const [activeTab, setActiveTab] = useState<Tab>("all");
-  const [search, setSearch] = useState("");
-  const [tierFilter, setTierFilter] = useState("");
-  const [statusFilter, setStatusFilter] = useState("");
-  const [sourceFilter, setSourceFilter] = useState("");
-  const [includeExcluded, setIncludeExcluded] = useState(false);
+  const [tierFilters, setTierFilters] = useState<string[]>([]);
+  const [sourceFilters, setSourceFilters] = useState<string[]>([]);
+  const [statusFilters, setStatusFilters] = useState<string[]>([]);
+  const [targetOnly, setTargetOnly] = useState(true);
+  const [density, setDensity] = useState<"comfortable" | "compact">("comfortable");
 
-  const statuses = useMemo(() => getUniqueStatuses(leads), [leads]);
-  const sources = useMemo(() => getUniqueSources(leads), [leads]);
+  const excludedCount = useMemo(() => leads.filter((l) => l.sector_excluded).length, [leads]);
 
-  const tabCounts = useMemo(
-    () => ({
-      all: leads.length,
-      latest_run: leads.filter((l) => l.is_new_in_run).length,
-      pending: leads.filter((l) => l.sales_status === "pending_review").length,
-      recent: leads.length,
-    }),
+  const uniqueStatuses = useMemo(
+    () => [...new Set(leads.map((l) => l.sales_status))].sort(),
     [leads]
   );
 
-  const tabLeads = useMemo(
-    () => getTabLeads(leads, activeTab),
-    [leads, activeTab]
-  );
+  function toggleFilter(arr: string[], val: string, set: (v: string[]) => void) {
+    set(arr.includes(val) ? arr.filter((x) => x !== val) : [...arr, val]);
+  }
 
   const filtered = useMemo(() => {
-    let result = tabLeads;
-    if (!includeExcluded) result = result.filter((l) => !l.sector_excluded);
-    if (search.trim()) {
-      const q = search.toLowerCase();
-      result = result.filter((l) =>
-        l.company_name.toLowerCase().includes(q)
-      );
-    }
-    if (tierFilter) result = result.filter((l) => l.tier === tierFilter);
-    if (statusFilter)
-      result = result.filter((l) => l.sales_status === statusFilter);
-    if (sourceFilter)
-      result = result.filter((l) => l.primary_source === sourceFilter);
+    let result = leads;
+    if (targetOnly) result = result.filter((l) => !l.sector_excluded);
+    if (tierFilters.length > 0)
+      result = result.filter((l) => tierFilters.includes((l.tier ?? "").toLowerCase()));
+    if (sourceFilters.length > 0)
+      result = result.filter((l) => {
+        const isPrime = l.signal_type === "CONTRACT_AWARD";
+        const isSub = l.signal_type === "SUBCONTRACT_AWARD";
+        return sourceFilters.some(
+          (sf) => (sf === "Prime" && isPrime) || (sf === "Sub" && isSub)
+        );
+      });
+    if (statusFilters.length > 0)
+      result = result.filter((l) => statusFilters.includes(l.sales_status));
     return result;
-  }, [tabLeads, search, tierFilter, statusFilter, sourceFilter, includeExcluded]);
+  }, [leads, targetOnly, tierFilters, sourceFilters, statusFilters]);
 
-  const hasActiveFilters = search || tierFilter || statusFilter || sourceFilter;
-
-  function clearFilters() {
-    setSearch("");
-    setTierFilter("");
-    setStatusFilter("");
-    setSourceFilter("");
-  }
+  const compact = density === "compact";
+  const rowH = compact ? 44 : 54;
 
   if (fetchError) {
     return (
-      <div className="px-6 py-6 max-w-2xl">
+      <div style={{ padding: "24px" }}>
         <ErrorState message={fetchError} />
       </div>
     );
   }
 
   return (
-    <div className="flex flex-col" style={{ minHeight: 0 }}>
-      {/* View tabs */}
-      <div className="border-b border-slate-200 bg-white px-6 flex items-center gap-0">
-        {TABS.map(({ key, label }) => (
-          <button
-            key={key}
-            onClick={() => setActiveTab(key)}
-            className={`relative px-4 py-3 text-[13px] font-medium transition-colors whitespace-nowrap ${
-              activeTab === key
-                ? "text-blue-600"
-                : "text-slate-500 hover:text-slate-700"
-            }`}
-          >
-            {activeTab === key && (
-              <span className="absolute bottom-0 left-0 right-0 h-0.5 bg-blue-600" />
-            )}
-            {label}
-            {tabCounts[key] > 0 && (
-              <span
-                className={`ml-1.5 text-[10px] rounded px-1.5 py-0.5 tabular-nums ${
-                  activeTab === key
-                    ? "bg-blue-50 text-blue-600"
-                    : "bg-slate-100 text-slate-500"
-                }`}
-              >
-                {tabCounts[key].toLocaleString()}
-              </span>
-            )}
-          </button>
-        ))}
-      </div>
-
+    <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
       {/* Filter bar */}
-      <div className="border-b border-slate-200 bg-white px-6 py-3 flex items-center gap-3 flex-wrap">
-        <div className="relative flex-1 min-w-[180px] max-w-xs">
-          <Search className="absolute left-2.5 top-[7px] w-3.5 h-3.5 text-slate-400 pointer-events-none" />
-          <input
-            type="text"
-            placeholder="Search companies..."
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            className="w-full pl-8 pr-3 py-[6px] text-[13px] bg-slate-50 border border-slate-200 rounded-md text-slate-900 placeholder-slate-400 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 transition-colors"
-          />
+      <div
+        style={{
+          padding: "0 24px 14px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 16,
+          flexWrap: "wrap",
+          rowGap: 10,
+          flexShrink: 0,
+        }}
+      >
+        {/* Left: filter chips */}
+        <div style={{ display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap", rowGap: 8 }}>
+          <span
+            style={{
+              fontSize: 11,
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: "0.08em",
+              color: "#71717A",
+            }}
+          >
+            Filters
+          </span>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 10, color: "#A1A1AA", marginRight: 1 }}>Tier</span>
+            {["Hot", "Warm", "Cold", "Archive"].map((t) => (
+              <Chip
+                key={t}
+                label={t}
+                active={tierFilters.includes(t.toLowerCase())}
+                onClick={() => toggleFilter(tierFilters, t.toLowerCase(), setTierFilters)}
+              />
+            ))}
+          </div>
+
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 10, color: "#A1A1AA", marginRight: 1 }}>Source</span>
+            {["Prime", "Sub"].map((s) => (
+              <Chip
+                key={s}
+                label={s}
+                active={sourceFilters.includes(s)}
+                onClick={() => toggleFilter(sourceFilters, s, setSourceFilters)}
+              />
+            ))}
+          </div>
+
+          {uniqueStatuses.length > 1 && (
+            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+              <span style={{ fontSize: 10, color: "#A1A1AA", marginRight: 1 }}>Status</span>
+              {uniqueStatuses.slice(0, 5).map((s) => (
+                <Chip
+                  key={s}
+                  label={s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
+                  active={statusFilters.includes(s)}
+                  onClick={() => toggleFilter(statusFilters, s, setStatusFilters)}
+                />
+              ))}
+            </div>
+          )}
         </div>
 
-        <select
-          value={tierFilter}
-          onChange={(e) => setTierFilter(e.target.value)}
-          className="text-[13px] bg-slate-50 border border-slate-200 rounded-md px-2.5 py-[6px] text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 transition-colors"
+        {/* Right: target toggle */}
+        <div
+          style={{ display: "flex", alignItems: "center", gap: 9, cursor: "pointer", userSelect: "none" }}
+          onClick={() => setTargetOnly(!targetOnly)}
         >
-          <option value="">All tiers</option>
-          {TIERS.map((t) => (
-            <option key={t} value={t}>
-              {t.charAt(0).toUpperCase() + t.slice(1)}
-            </option>
-          ))}
-        </select>
-
-        {statuses.length > 1 && (
-          <select
-            value={statusFilter}
-            onChange={(e) => setStatusFilter(e.target.value)}
-            className="text-[13px] bg-slate-50 border border-slate-200 rounded-md px-2.5 py-[6px] text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 transition-colors"
-          >
-            <option value="">All statuses</option>
-            {statuses.map((s) => (
-              <option key={s} value={s}>
-                {s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
-              </option>
-            ))}
-          </select>
-        )}
-
-        {sources.length > 1 && (
-          <select
-            value={sourceFilter}
-            onChange={(e) => setSourceFilter(e.target.value)}
-            className="text-[13px] bg-slate-50 border border-slate-200 rounded-md px-2.5 py-[6px] text-slate-700 focus:outline-none focus:ring-1 focus:ring-blue-500 focus:border-blue-500 transition-colors"
-          >
-            <option value="">All sources</option>
-            {sources.map((s) => (
-              <option key={s} value={s}>
-                {s}
-              </option>
-            ))}
-          </select>
-        )}
-
-        {hasActiveFilters && (
-          <button
-            onClick={clearFilters}
-            className="flex items-center gap-1 text-[12px] text-slate-500 hover:text-slate-700 transition-colors"
-          >
-            <X className="w-3 h-3" />
-            Clear filters
-          </button>
-        )}
-
-        <label className="flex items-center gap-1.5 cursor-pointer ml-2 select-none">
-          <input
-            type="checkbox"
-            checked={includeExcluded}
-            onChange={(e) => setIncludeExcluded(e.target.checked)}
-            className="w-3.5 h-3.5 rounded border-slate-300 text-amber-500 focus:ring-amber-400"
-          />
-          <span className="text-[12px] text-slate-400 whitespace-nowrap">
-            Include leads outside Porter ICP sectors
+          <span style={{ fontSize: 11, color: "#71717A" }}>
+            Target industries only{" "}
+            {excludedCount > 0 && (
+              <span style={{ color: "#A1A1AA" }}>({excludedCount})</span>
+            )}
           </span>
-        </label>
-
-        <p className="ml-auto text-[11px] text-slate-400 tabular-nums whitespace-nowrap">
-          {filtered.length.toLocaleString()} of {total.toLocaleString()} leads
-        </p>
+          <Toggle on={targetOnly} onChange={setTargetOnly} />
+        </div>
       </div>
 
-      {/* Active filter chips */}
-      {hasActiveFilters && (
-        <div className="bg-white border-b border-slate-100 px-6 py-2 flex items-center gap-2 flex-wrap">
-          <span className="text-[10px] text-slate-400 uppercase tracking-wider font-semibold mr-1">
-            Active:
-          </span>
-          {search && (
-            <FilterChip
-              label={`Search: "${search}"`}
-              onRemove={() => setSearch("")}
-            />
-          )}
-          {tierFilter && (
-            <FilterChip
-              label={`Tier: ${tierFilter}`}
-              onRemove={() => setTierFilter("")}
-            />
-          )}
-          {statusFilter && (
-            <FilterChip
-              label={`Status: ${statusFilter.replace(/_/g, " ")}`}
-              onRemove={() => setStatusFilter("")}
-            />
-          )}
-          {sourceFilter && (
-            <FilterChip
-              label={`Source: ${sourceFilter}`}
-              onRemove={() => setSourceFilter("")}
-            />
-          )}
+      {/* Count + density row */}
+      <div
+        style={{
+          padding: "0 24px 14px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          flexShrink: 0,
+        }}
+      >
+        <div
+          style={{
+            fontSize: 11,
+            color: "#71717A",
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {filtered.length.toLocaleString()} / {total.toLocaleString()} ·{" "}
+          <span
+            style={{
+              color: "#09090B",
+              fontWeight: 500,
+              fontFamily: "var(--font-data, Inter, sans-serif)",
+            }}
+          >
+            {fmtPipelineValue(filtered)}
+          </span>{" "}
+          in view
         </div>
-      )}
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div
+            style={{
+              display: "flex",
+              border: "0.5px solid #E4E4E7",
+              borderRadius: 7,
+              overflow: "hidden",
+            }}
+          >
+            {(["comfortable", "compact"] as const).map((d) => (
+              <button
+                key={d}
+                onClick={() => setDensity(d)}
+                style={{
+                  padding: "4px 11px",
+                  fontSize: 11,
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  border: "none",
+                  borderLeft: d === "compact" ? "0.5px solid #E4E4E7" : "none",
+                  background: density === d ? "#09090B" : "#FFFFFF",
+                  color: density === d ? "#FAFAFA" : "#71717A",
+                  outline: "none",
+                }}
+              >
+                {d === "comfortable" ? "Default" : "Compact"}
+              </button>
+            ))}
+          </div>
+          <div style={{ fontSize: 11, color: "#71717A" }}>
+            Sort <span style={{ color: "#09090B", fontWeight: 500 }}>Score</span>{" "}
+            <span style={{ color: "#A1A1AA" }}>▾</span>
+          </div>
+        </div>
+      </div>
 
       {/* Table */}
-      <div className="overflow-x-auto">
-        {filtered.length === 0 ? (
-          <EmptyState
-            title={
-              hasActiveFilters
-                ? "No leads match these filters"
-                : "No leads found"
-            }
-            description={
-              hasActiveFilters
-                ? "Try adjusting your search or filters."
-                : "Run the pipeline to populate leads."
-            }
-          />
-        ) : (
-          <table className="min-w-full">
-            <thead className="bg-white border-b border-slate-200">
-              <tr>
-                <th className="px-5 py-3 text-left text-[10px] font-semibold uppercase tracking-widest text-slate-400 whitespace-nowrap">
-                  Company
-                </th>
-                <th className="px-4 py-3 text-left text-[10px] font-semibold uppercase tracking-widest text-slate-400 whitespace-nowrap">
-                  Tier
-                </th>
-                <th className="px-4 py-3 text-right text-[10px] font-semibold uppercase tracking-widest text-slate-400 whitespace-nowrap">
-                  Score
-                </th>
-                <th className="px-4 py-3 text-left text-[10px] font-semibold uppercase tracking-widest text-slate-400 whitespace-nowrap">
-                  Source
-                </th>
-                <th className="px-4 py-3 text-left text-[10px] font-semibold uppercase tracking-widest text-slate-400 whitespace-nowrap">
-                  Signal Date
-                </th>
-                <th className="px-4 py-3 text-right text-[10px] font-semibold uppercase tracking-widest text-slate-400 whitespace-nowrap">
-                  Max Award
-                </th>
-                <th className="px-4 py-3 text-left text-[10px] font-semibold uppercase tracking-widest text-slate-400 whitespace-nowrap">
-                  Status
-                </th>
-                <th className="px-4 py-3 text-center text-[10px] font-semibold uppercase tracking-widest text-slate-400 whitespace-nowrap">
-                  In Run
-                </th>
-              </tr>
-            </thead>
-            <tbody className="divide-y divide-slate-100 bg-white">
-              {filtered.map((lead) => (
-                <tr
-                  key={lead.lead_id}
-                  className="hover:bg-slate-50 transition-colors group"
+      <div
+        style={{
+          background: "#FFFFFF",
+          border: "0.5px solid #E4E4E7",
+          borderRadius: 8,
+          overflow: "hidden",
+          margin: "0 24px",
+          flexShrink: 0,
+        }}
+      >
+        <div style={{ overflowX: "auto" }}>
+          <div style={{ minWidth: 1140 }}>
+            {/* Header */}
+            <div
+              style={{
+                display: "grid",
+                gridTemplateColumns: GRID_COLS,
+                alignItems: "center",
+                padding: "0 16px",
+                height: 38,
+                borderBottom: "0.5px solid #E4E4E7",
+              }}
+            >
+              <div />
+              {[
+                "Company",
+                "Score",
+                "Tier",
+                "Source",
+                "Industry",
+                "Award $",
+                "Agency",
+                "Signal",
+                "Status",
+              ].map((h, i) => (
+                <div
+                  key={h}
+                  style={{
+                    fontSize: 11,
+                    fontWeight: 500,
+                    textTransform: "uppercase",
+                    letterSpacing: "0.08em",
+                    color: "#71717A",
+                    textAlign: h === "Award $" ? "right" : "left",
+                    paddingRight: h === "Award $" ? 16 : 0,
+                  }}
                 >
-                  <td className="px-5 py-3">
-                    <Link
-                      href={`/leads/${lead.lead_id}`}
-                      className="block min-w-0"
-                    >
-                      <span className="inline-flex items-center gap-1.5 leading-snug">
-                        <span className="text-[13px] font-medium text-slate-900 group-hover:text-blue-600 transition-colors">
-                          {lead.company_name}
-                        </span>
-                        {includeExcluded && lead.sector_excluded && (
-                          <span
-                            title={lead.sector_excluded_reason ?? "Outside Porter ICP sector"}
-                            className="inline-flex items-center gap-0.5 px-1.5 py-0.5 rounded text-[10px] font-semibold bg-amber-50 text-amber-700 ring-1 ring-inset ring-amber-600/20 whitespace-nowrap"
-                          >
-                            ⚠ Outside ICP
-                          </span>
-                        )}
-                      </span>
-                      <span className="block text-[10px] font-mono text-slate-400 mt-0.5">
-                        {lead.lead_id.substring(0, 8)}&hellip;
-                      </span>
-                    </Link>
-                  </td>
-                  <td className="px-4 py-3">
-                    <TierBadge tier={lead.tier} />
-                  </td>
-                  <td className="px-4 py-3 text-right">
-                    <span
-                      className={`text-[13px] font-bold tabular-nums font-mono ${
-                        SCORE_COLOR[lead.tier ?? ""] ?? "text-slate-600"
-                      }`}
-                    >
-                      {fmtScore(lead.score)}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex flex-col gap-1">
-                      <SourceBadge source={lead.primary_source} />
-                      <SignalTypeBadge signalType={lead.signal_type} />
-                    </div>
-                  </td>
-                  <td className="px-4 py-3 text-[12px] text-slate-500 whitespace-nowrap">
-                    {fmtDate(lead.latest_signal_date)}
-                  </td>
-                  <td className="px-4 py-3 text-right text-[12px] font-medium text-slate-700 tabular-nums">
-                    {fmtMoney(lead.max_award_amount)}
-                  </td>
-                  <td className="px-4 py-3">
-                    <StatusBadge status={lead.sales_status} />
-                  </td>
-                  <td className="px-4 py-3 text-center">
-                    {lead.is_new_in_run ? (
-                      <span
-                        title="New in latest run"
-                        className="inline-block w-2 h-2 rounded-full bg-emerald-500"
-                      />
-                    ) : (
-                      <span className="text-slate-200 text-xs">—</span>
-                    )}
-                  </td>
-                </tr>
+                  {h}
+                </div>
               ))}
-            </tbody>
-          </table>
-        )}
+            </div>
+
+            {/* Rows */}
+            {filtered.length === 0 ? (
+              <EmptyState
+                title="No leads match these filters"
+                description="Try adjusting your filters or toggling the target industries switch."
+              />
+            ) : (
+              filtered.map((lead, idx) => {
+                const tierKey = (lead.tier ?? "").toLowerCase();
+                const tierCfg = TIER_CFG[tierKey] ?? TIER_CFG.archive;
+                const isPrime = lead.signal_type === "CONTRACT_AWARD";
+                const isSub = lead.signal_type === "SUBCONTRACT_AWARD";
+                const pal = avatarPalette(lead.company_name);
+                const initials = getInitials(lead.company_name);
+                const rowBg = idx % 2 === 0 ? "#FFFFFF" : "#FAFAFA";
+
+                return (
+                  <LeadRow
+                    key={lead.lead_id}
+                    lead={lead}
+                    rowBg={rowBg}
+                    rowH={rowH}
+                    tierCfg={tierCfg}
+                    isPrime={isPrime}
+                    isSub={isSub}
+                    pal={pal}
+                    initials={initials}
+                  />
+                );
+              })
+            )}
+          </div>
+        </div>
       </div>
 
-      {/* Table footer */}
-      {filtered.length > 0 && total > leads.length && (
-        <div className="bg-white border-t border-slate-100 px-5 py-2.5">
-          <p className="text-[11px] text-slate-400">
-            Showing {leads.length.toLocaleString()} of{" "}
-            {total.toLocaleString()} total leads — expand limit to see more.
-          </p>
+      {/* Keyboard hints */}
+      <div
+        style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 12,
+          padding: "12px 26px 20px",
+          flexShrink: 0,
+        }}
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 14, fontSize: 11, color: "#A1A1AA" }}>
+          {[
+            { key: "↑↓", label: "navigate" },
+            { key: "⏎", label: "open" },
+            { key: "Space", label: "select" },
+            { key: "⌘K", label: "command" },
+          ].map(({ key, label }) => (
+            <span key={key} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <span
+                style={{
+                  fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                  fontSize: 10,
+                  padding: "1px 6px",
+                  borderRadius: 4,
+                  background: "#F4F4F5",
+                  color: "#71717A",
+                }}
+              >
+                {key}
+              </span>
+              {label}
+            </span>
+          ))}
         </div>
-      )}
+        <div style={{ fontSize: 11, color: "#A1A1AA", fontVariantNumeric: "tabular-nums" }}>
+          Showing 1–{Math.min(filtered.length, 2000).toLocaleString()} of{" "}
+          {total.toLocaleString()} leads
+        </div>
+      </div>
     </div>
+  );
+}
+
+// ── Individual row (extracted to avoid inline closure issues) ──────────────────
+
+interface RowProps {
+  lead: LeadListItem;
+  rowBg: string;
+  rowH: number;
+  tierCfg: { color: string; bg: string; label: string };
+  isPrime: boolean;
+  isSub: boolean;
+  pal: { bg: string; text: string };
+  initials: string;
+}
+
+function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, pal, initials }: RowProps) {
+  const [hovered, setHovered] = useState(false);
+
+  const naics = lead.company_naics ?? "—";
+  const industry = lead.company_naics_description ?? lead.company_industry ?? "—";
+  const agency = lead.awarding_agency ?? "—";
+  const location = lead.company_state ?? "";
+
+  return (
+    <Link
+      href={`/leads/${lead.lead_id}`}
+      style={{ textDecoration: "none", display: "block" }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+    >
+      <div
+        style={{
+          display: "grid",
+          gridTemplateColumns:
+            "26px minmax(200px,1.7fr) 80px 88px 72px minmax(160px,1.2fr) 92px 130px 96px 100px",
+          alignItems: "center",
+          padding: "0 16px",
+          minHeight: rowH,
+          background: hovered ? "#EFF6FF" : rowBg,
+          borderTop: "0.5px solid #E4E4E7",
+          cursor: "pointer",
+          transition: "background 0.1s",
+        }}
+      >
+        {/* Checkbox */}
+        <div>
+          <span
+            style={{
+              display: "block",
+              width: 14,
+              height: 14,
+              border: "1px solid #D4D4D8",
+              borderRadius: 3,
+              background: "#FFFFFF",
+            }}
+          />
+        </div>
+
+        {/* Company */}
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 10,
+            minWidth: 0,
+            paddingRight: 12,
+          }}
+        >
+          <span
+            style={{
+              width: 28,
+              height: 28,
+              flexShrink: 0,
+              borderRadius: 6,
+              background: pal.bg,
+              color: pal.text,
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 10,
+              fontWeight: 600,
+              fontFamily: "var(--font-data, Inter, sans-serif)",
+            }}
+          >
+            {initials}
+          </span>
+          <span style={{ minWidth: 0 }}>
+            <span
+              style={{
+                display: "block",
+                fontSize: 13,
+                fontWeight: 500,
+                color: "#2563EB",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {lead.company_name}
+              {lead.sector_excluded && (
+                <span
+                  style={{
+                    marginLeft: 6,
+                    fontSize: 9,
+                    fontWeight: 600,
+                    letterSpacing: "0.03em",
+                    padding: "1px 5px",
+                    borderRadius: 3,
+                    background: "rgba(217,119,6,0.10)",
+                    color: "#D97706",
+                    verticalAlign: "middle",
+                  }}
+                >
+                  OFF-TARGET
+                </span>
+              )}
+            </span>
+            <span
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: 7,
+                marginTop: 2,
+                minWidth: 0,
+              }}
+            >
+              <span
+                style={{
+                  fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+                  fontSize: 10,
+                  color: "#A1A1AA",
+                  flexShrink: 0,
+                }}
+              >
+                {lead.lead_id.substring(0, 8)}…
+              </span>
+              {location && (
+                <span
+                  style={{
+                    fontSize: 11,
+                    color: "#A1A1AA",
+                    whiteSpace: "nowrap",
+                    overflow: "hidden",
+                    textOverflow: "ellipsis",
+                  }}
+                >
+                  {location}
+                </span>
+              )}
+            </span>
+          </span>
+        </div>
+
+        {/* Score */}
+        <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+          <span
+            style={{
+              fontFamily: "var(--font-data, Inter, sans-serif)",
+              fontSize: 14,
+              fontWeight: 500,
+              fontVariantNumeric: "tabular-nums",
+              color: tierCfg.color,
+            }}
+          >
+            {lead.score ?? "—"}
+          </span>
+          {lead.score != null && (
+            <div
+              style={{
+                width: 64,
+                height: 3,
+                background: "#E4E4E7",
+                borderRadius: 2,
+                overflow: "hidden",
+              }}
+            >
+              <div
+                style={{
+                  width: `${Math.min(100, ((lead.score ?? 0) / 73) * 100)}%`,
+                  height: "100%",
+                  background: tierCfg.color,
+                }}
+              />
+            </div>
+          )}
+        </div>
+
+        {/* Tier */}
+        <div>
+          <span
+            style={{
+              display: "inline-flex",
+              alignItems: "center",
+              gap: 5,
+              padding: "3px 9px",
+              borderRadius: 999,
+              fontSize: 10,
+              fontWeight: 500,
+              background: tierCfg.bg,
+              color: tierCfg.color,
+            }}
+          >
+            <span
+              style={{
+                width: 5,
+                height: 5,
+                borderRadius: "50%",
+                background: tierCfg.color,
+                flexShrink: 0,
+              }}
+            />
+            {tierCfg.label}
+          </span>
+        </div>
+
+        {/* Source */}
+        <div>
+          {isPrime || isSub ? (
+            <span
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                padding: "3px 7px",
+                borderRadius: 4,
+                fontSize: 10,
+                fontWeight: 500,
+                background: isPrime ? "rgba(22,163,74,0.10)" : "rgba(37,99,235,0.10)",
+                color: isPrime ? "#16A34A" : "#2563EB",
+              }}
+            >
+              {isPrime ? "↑ Prime" : "↓ Sub"}
+            </span>
+          ) : (
+            <span style={{ fontSize: 12, color: "#A1A1AA" }}>—</span>
+          )}
+        </div>
+
+        {/* Industry */}
+        <div style={{ minWidth: 0, paddingRight: 12 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 6, minWidth: 0 }}>
+            <span
+              style={{
+                fontSize: 12,
+                color: "#52525B",
+                whiteSpace: "nowrap",
+                overflow: "hidden",
+                textOverflow: "ellipsis",
+              }}
+            >
+              {industry}
+            </span>
+          </div>
+          <div
+            style={{
+              fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
+              fontSize: 10,
+              color: "#A1A1AA",
+              marginTop: 2,
+            }}
+          >
+            {naics !== "—" ? `NAICS ${naics}` : "—"}
+          </div>
+        </div>
+
+        {/* Award $ */}
+        <div
+          style={{
+            fontFamily: "var(--font-data, Inter, sans-serif)",
+            fontSize: 12,
+            fontWeight: 500,
+            fontVariantNumeric: "tabular-nums",
+            textAlign: "right",
+            paddingRight: 16,
+            color: "#09090B",
+          }}
+        >
+          {fmtMoney(lead.max_award_amount)}
+        </div>
+
+        {/* Agency */}
+        <div
+          style={{
+            fontSize: 12,
+            color: "#52525B",
+            whiteSpace: "nowrap",
+            overflow: "hidden",
+            textOverflow: "ellipsis",
+            paddingRight: 10,
+          }}
+        >
+          {agency}
+        </div>
+
+        {/* Signal date */}
+        <div
+          style={{
+            fontSize: 12,
+            color: "#A1A1AA",
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {fmtDate(lead.latest_signal_date)}
+        </div>
+
+        {/* Status */}
+        <div>
+          <StatusBadge status={lead.sales_status} />
+        </div>
+      </div>
+    </Link>
   );
 }
