@@ -1,17 +1,25 @@
 import type { Metadata } from "next";
-import { Geist, Geist_Mono } from "next/font/google";
+import { Plus_Jakarta_Sans, Inter, JetBrains_Mono } from "next/font/google";
 import Sidebar from "@/components/layout/Sidebar";
-import { AlertTriangle } from "lucide-react";
+import TopBar from "@/components/layout/TopBar";
 import "./globals.css";
 
-const geistSans = Geist({
-  variable: "--font-geist-sans",
+const plusJakarta = Plus_Jakarta_Sans({
+  variable: "--font-sans",
   subsets: ["latin"],
+  weight: ["400", "500", "600", "700"],
 });
 
-const geistMono = Geist_Mono({
-  variable: "--font-geist-mono",
+const inter = Inter({
+  variable: "--font-data",
   subsets: ["latin"],
+  weight: ["400", "500", "600"],
+});
+
+const jetbrainsMono = JetBrains_Mono({
+  variable: "--font-mono",
+  subsets: ["latin"],
+  weight: ["400", "500"],
 });
 
 export const metadata: Metadata = {
@@ -27,23 +35,12 @@ export default function RootLayout({
   return (
     <html
       lang="en"
-      className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
+      className={`${plusJakarta.variable} ${inter.variable} ${jetbrainsMono.variable} h-full`}
     >
-      <body className="h-full flex bg-slate-50 text-slate-900">
+      <body className="h-full flex" style={{ background: "#FAFAFA" }}>
         <Sidebar />
-
         <div className="flex flex-col flex-1 min-w-0 overflow-hidden">
-          {/* Research-only warning strip */}
-          <div className="shrink-0 bg-amber-50 border-b border-amber-200/80 px-5 py-[7px] flex items-center gap-2.5">
-            <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
-            <p className="text-[11px] text-amber-800 leading-snug">
-              <span className="font-semibold">Research-ready only.</span> No
-              verified contacts. No Salesforce push. Human review required
-              before any outreach.
-            </p>
-          </div>
-
-          {/* Page content */}
+          <TopBar />
           <main className="flex-1 overflow-y-auto flex flex-col">
             {children}
           </main>

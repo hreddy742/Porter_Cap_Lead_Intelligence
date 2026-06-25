@@ -50,6 +50,12 @@ export interface LeadListItem {
   updated_at: string;
   sector_excluded: boolean;
   sector_excluded_reason: string | null;
+  // Optional fields that may be returned by the API
+  company_naics?: string | null;
+  company_naics_description?: string | null;
+  company_industry?: string | null;
+  awarding_agency?: string | null;
+  company_state?: string | null;
 }
 
 export interface LeadsListResponse {
