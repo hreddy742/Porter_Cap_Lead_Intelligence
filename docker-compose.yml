@@ -22,7 +22,11 @@ services:
     env_file: .env
     environment:
       DATABASE_URL: postgresql://porter:localdev@db:5432/porter_leads
-      USASPENDING_MAX_PAGES: "10"
+      PYTHONIOENCODING: "utf-8"
+      USASPENDING_MAX_PAGES: "100"
+      PIPELINE_INTERVAL_HOURS: "4"
+      MIN_QUALIFYING_SINGLE_AWARD_AMOUNT: "50000"
+      MIN_QUALIFYING_COMPANY_90D_AWARD_TOTAL: "50000"
     depends_on:
       db:
         condition: service_healthy
