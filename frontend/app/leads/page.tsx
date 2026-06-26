@@ -102,7 +102,7 @@ function StatCard({ label, value, sub, borderColor, deltaLabel, deltaUp }: StatC
 export default async function LeadsPage() {
   const [summaryResult, dataResult] = await Promise.allSettled([
     fetchSummary(),
-    fetchLeads({ limit: "2000", sort_by: "score_desc", include_excluded: "true" }),
+    fetchLeads({ limit: "50000", sort_by: "score_desc", include_excluded: "true" }),
   ]);
 
   const summary = summaryResult.status === "fulfilled" ? summaryResult.value : null;
