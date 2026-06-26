@@ -530,6 +530,51 @@ class TestSignalTypeFilter:
         r = client.get("/api/leads?signal_type=SUBCONTRACT_AWARD")
         assert r.status_code == 200
 
+    def test_signal_type_sba_pif_accepted(self, client):
+        r = client.get("/api/leads?signal_type=SBA_LOAN_PIF")
+        assert r.status_code == 200
+
+    def test_signal_type_sba_active_accepted(self, client):
+        r = client.get("/api/leads?signal_type=SBA_LOAN_ACTIVE")
+        assert r.status_code == 200
+
+    @pytest.mark.db
+    def test_sba_pif_signal_type_returned_in_list(self, client, db_session):
+        """API returns signal_type='SBA_LOAN_PIF' for a lead with an SBA_LOAN_PIF signal."""
+        self._make_company_with_signal(
+            db_session, "SBA PIF Test Corp", "sbapif00012345", "SBA_LOAN_PIF"
+        )
+        r = client.get("/api/leads?include_excluded=true")
+        assert r.status_code == 200
+        items = r.json()["items"]
+        match = next((i for i in items if i["company_name"] == "SBA PIF Test Corp"), None)
+        assert match is not None, "SBA_LOAN_PIF lead not found in API response"
+        assert match["signal_type"] == "SBA_LOAN_PIF", (
+            f"Expected signal_type='SBA_LOAN_PIF', got {match['signal_type']!r}"
+        )
+
+    @pytest.mark.db
+    def test_sba_pif_filter_returns_sba_leads(self, client, db_session):
+        """?signal_type=SBA_LOAN_PIF returns leads whose company has SBA_LOAN_PIF signal."""
+        self._make_company_with_signal(
+            db_session, "SBA PIF Filter Corp", "sbapiffilter123", "SBA_LOAN_PIF"
+        )
+        r = client.get("/api/leads?signal_type=SBA_LOAN_PIF&include_excluded=true")
+        assert r.status_code == 200
+        names = [i["company_name"] for i in r.json()["items"]]
+        assert "SBA PIF Filter Corp" in names
+
+    @pytest.mark.db
+    def test_sba_pif_filter_excludes_contract_leads(self, client, db_session):
+        """?signal_type=SBA_LOAN_PIF must not return a lead with only CONTRACT_AWARD signal."""
+        self._make_company_with_signal(
+            db_session, "Prime No SBA Corp", "primensbaf1234", "CONTRACT_AWARD"
+        )
+        r = client.get("/api/leads?signal_type=SBA_LOAN_PIF&include_excluded=true")
+        assert r.status_code == 200
+        names = [i["company_name"] for i in r.json()["items"]]
+        assert "Prime No SBA Corp" not in names
+
     @pytest.mark.db
     def test_subcontract_filter_excludes_contract_leads(self, client, db_session):
         """?signal_type=SUBCONTRACT_AWARD must not return a lead whose only signal is CONTRACT_AWARD."""

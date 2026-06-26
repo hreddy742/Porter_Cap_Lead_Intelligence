@@ -92,7 +92,12 @@ def list_leads(
             db.query(Signal.company_id, Signal.signal_type, Signal.signal_date)
             .filter(
                 Signal.company_id.in_(company_ids),
-                Signal.signal_type.in_(["CONTRACT_AWARD", "SUBCONTRACT_AWARD"]),
+                Signal.signal_type.in_([
+                    "CONTRACT_AWARD",
+                    "SUBCONTRACT_AWARD",
+                    "SBA_LOAN_PIF",
+                    "SBA_LOAN_ACTIVE",
+                ]),
             )
             .order_by(Signal.signal_date.desc())
             .all()

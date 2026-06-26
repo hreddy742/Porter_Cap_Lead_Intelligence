@@ -169,7 +169,10 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
 
   const filtered = useMemo(() => {
     let result = leads;
-    if (targetOnly) result = result.filter((l) => !l.sector_excluded);
+    const sbaFilterActive = sourceFilters.some(
+      (sf) => sf === "SBA PIF" || sf === "SBA Active"
+    );
+    if (targetOnly && !sbaFilterActive) result = result.filter((l) => !l.sector_excluded);
     if (tierFilters.length > 0)
       result = result.filter((l) => tierFilters.includes((l.tier ?? "").toLowerCase()));
     if (sourceFilters.length > 0)
