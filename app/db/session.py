@@ -9,9 +9,10 @@ from collections.abc import Generator
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
+_pg_password = os.environ.get("POSTGRES_PASSWORD", "")
 DATABASE_URL = os.environ.get(
     "DATABASE_URL",
-    "postgresql://porter:localdev@localhost:5432/porter_leads",
+    f"postgresql://porter:{_pg_password}@localhost:5432/porter_leads",
 )
 
 engine = create_engine(

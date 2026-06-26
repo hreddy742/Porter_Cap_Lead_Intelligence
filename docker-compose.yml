@@ -6,7 +6,7 @@ services:
     environment:
       POSTGRES_DB: porter_leads
       POSTGRES_USER: porter
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-localdev}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
     ports:
       - "5432:5432"
     volumes:
@@ -21,7 +21,7 @@ services:
     build: .
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://porter:localdev@db:5432/porter_leads
+      DATABASE_URL: postgresql://porter:${POSTGRES_PASSWORD}@db:5432/porter_leads
       PYTHONIOENCODING: "utf-8"
       USASPENDING_MAX_PAGES: "100"
       PIPELINE_INTERVAL_HOURS: "4"
@@ -39,7 +39,7 @@ services:
     build: .
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://porter:localdev@db:5432/porter_leads
+      DATABASE_URL: postgresql://porter:${POSTGRES_PASSWORD}@db:5432/porter_leads
     depends_on:
       db:
         condition: service_healthy
@@ -53,7 +53,7 @@ services:
     build: .
     env_file: .env
     environment:
-      DATABASE_URL: postgresql://porter:localdev@db:5432/porter_leads
+      DATABASE_URL: postgresql://porter:${POSTGRES_PASSWORD}@db:5432/porter_leads
     depends_on:
       db:
         condition: service_healthy

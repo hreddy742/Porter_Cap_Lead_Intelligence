@@ -75,13 +75,7 @@ def _select_companies(
         ).fetchone()
         return [row] if row is not None else []
 
-    tier_clause = "AND lc.tier = :tier" if tier else ""
-    params: dict = {"limit": limit}
-    if tier:
-        params["tier"] = tier
-
-    rows = db.execute(
-        text(f"""
+    _BASE_SELECT = """
             SELECT
                 c.id           AS company_id,
                 c.canonical_name,
@@ -97,15 +91,23 @@ def _select_companies(
             WHERE lc.status = 'active'
               AND lc.deleted_at IS NULL
               AND c.deleted_at IS NULL
-              {tier_clause}
+    """
+    _ORDER_LIMIT = """
             ORDER BY
                 CASE lc.tier WHEN 'hot' THEN 1 WHEN 'warm' THEN 2 WHEN 'cold' THEN 3 ELSE 4 END ASC,
                 lc.current_score DESC NULLS LAST,
                 cc.last_checked_at ASC NULLS FIRST
             LIMIT :limit
-        """),
-        params,
-    ).fetchall()
+    """
+
+    if tier:
+        sql = text(_BASE_SELECT + "              AND lc.tier = :tier\n" + _ORDER_LIMIT)
+        params: dict = {"limit": limit, "tier": tier}
+    else:
+        sql = text(_BASE_SELECT + _ORDER_LIMIT)
+        params = {"limit": limit}
+
+    rows = db.execute(sql, params).fetchall()
     return list(rows)
 
 

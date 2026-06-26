@@ -1,0 +1,39 @@
+.env
+.env.local
+.env.*.local
+*.err
+
+# SBA bulk CSV — 150 MB, regenerated on first run
+data/sba_loans_cache.csv
+
+# Debug scripts (gitignored, but exclude from build context too)
+test_both_keys.py
+test_sam.py
+check_usa.py
+
+# Python bytecode
+__pycache__
+*.pyc
+*.pyo
+.pytest_cache
+.mypy_cache
+.ruff_cache
+
+# Git history
+.git
+
+# Frontend build artifacts and deps
+frontend/node_modules
+frontend/.next
+node_modules
+
+# Logs and editor files
+*.log
+.DS_Store
+.vscode
+.idea
+
+# Dev data
+exports/
+backups/
+outputs/
