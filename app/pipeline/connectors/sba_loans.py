@@ -38,6 +38,7 @@ import csv
 import hashlib
 import json
 import os
+import sys
 import time
 from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -374,6 +375,10 @@ class SBALoansConnector:
 
     def run(self) -> None:
         """Process SBA CSV. Mark source_run completed or failed. Never raises."""
+        # Windows stdout defaults to cp1252 which can't encode chars like Ⓡ (U+24C7).
+        # Reconfigure once so structlog can write company names with special characters.
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding="utf-8", errors="replace")
         try:
             self._process_csv()
             self.source_run.status = "completed"
