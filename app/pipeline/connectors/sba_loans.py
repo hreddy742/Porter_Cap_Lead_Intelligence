@@ -103,6 +103,34 @@ _SBA_INCLUDED_NAICS_PREFIXES = frozenset({
     # "72"             # Restaurants/Hotels/Bars
 })
 
+# Healthcare sub-sectors that are B2C for SBA loan purposes.
+# Individual practices bill patients/insurers — not B2B A/R accounts.
+# NOTE: Do NOT add these to the main pipeline exclusion gate. USASpending 62x
+# may include medical SUPPLY/DEVICE companies that are genuinely B2B.
+_SBA_EXCLUDED_NAICS_PREFIXES = frozenset({
+    "621",  # Ambulatory health care (physician, dental, chiropractic offices)
+    "622",  # Hospitals
+    "623",  # Nursing and residential care facilities
+    "624",  # Social assistance (child daycare, social services)
+})
+
+# Company name keywords that flag consumer-facing businesses not suited for
+# B2B A/R financing. Applied after NAICS filters as a secondary safeguard.
+_SBA_NOISE_KEYWORDS = frozenset({
+    "anesthesia",
+    "dental",
+    "dentist",
+    "orthodontic",
+    "pediatric",
+    "chiropractic",
+    "veterinary",
+    "daycare",
+    "day care",
+    "child care",
+    "preschool",
+    "academy",
+})
+
 _SOURCE_URL = "https://data.sba.gov/en/dataset/0ff8e8e9-b967-4f4e-987c-6ac78c575087"
 
 
@@ -238,6 +266,20 @@ def _is_included_naics(naics_code: str | None) -> bool:
         return False
     code = str(naics_code).strip()
     return any(code.startswith(prefix) for prefix in _SBA_INCLUDED_NAICS_PREFIXES)
+
+
+def _is_excluded_naics(naics_code: str | None) -> bool:
+    """Return True if the NAICS code is in a B2C-only sub-sector excluded from SBA leads."""
+    if not naics_code:
+        return False
+    code = str(naics_code).strip()
+    return any(code.startswith(prefix) for prefix in _SBA_EXCLUDED_NAICS_PREFIXES)
+
+
+def _has_noise_keyword(company_name: str) -> bool:
+    """Return True if the company name contains a B2C noise keyword."""
+    name_lower = company_name.lower()
+    return any(kw in name_lower for kw in _SBA_NOISE_KEYWORDS)
 
 
 def _signal_type_for_status(loan_status: str | None) -> str:
@@ -414,6 +456,16 @@ class SBALoansConnector:
 
         # NAICS filter — include only B2B sectors
         if not _is_included_naics(record.naics_code):
+            self.source_run.records_skipped += 1
+            return
+
+        # B2C sub-sector exclusion — 621/622/623/624 are patient-facing, not B2B
+        if _is_excluded_naics(record.naics_code):
+            self.source_run.records_skipped += 1
+            return
+
+        # Noise keyword filter — catch B2C businesses the NAICS filter may miss
+        if _has_noise_keyword(record.borr_name):
             self.source_run.records_skipped += 1
             return
 

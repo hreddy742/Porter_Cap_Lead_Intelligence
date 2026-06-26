@@ -27,8 +27,12 @@ from app.pipeline.connectors.sba_loans import (
     SBALoanRecord,
     SBALoansConnector,
     _is_included_naics,
+    _is_excluded_naics,
+    _has_noise_keyword,
     _signal_type_for_status,
     _SBA_INCLUDED_NAICS_PREFIXES,
+    _SBA_EXCLUDED_NAICS_PREFIXES,
+    _SBA_NOISE_KEYWORDS,
     _TARGET_STATES,
     _MIN_LOAN_AMOUNT,
     _MAX_LOAN_AMOUNT,
@@ -177,9 +181,9 @@ def test_wholesale_naics_included():
     assert source_run.records_valid == 1
 
 
-def test_healthcare_naics_included():
-    """NAICS 621111 (Healthcare) must be included — B2B medical sector 62."""
-    source_run, _ = _run_connector([_valid_row(naicscode="621111")])
+def test_medical_instruments_naics_included():
+    """NAICS 339113 (Medical Instrument Manufacturing) must be included — B2B manufacturing."""
+    source_run, _ = _run_connector([_valid_row(naicscode="339113")])
     assert source_run.records_valid == 1
 
 
@@ -531,7 +535,7 @@ def test_sba_loan_pif_why_now_bonus_is_8():
     evidence.id = evidence_id
     evidence.source_url = "https://data.sba.gov/dataset/7-a-504-foia"
     evidence.claim_supported = "SBA_LOAN_PIF"
-    evidence.freshness_score = Decimal("0.30")
+    evidence.freshness_score = Decimal("0.85")
     evidence.extracted_fields = {
         "award_amount": "500000",
         "action_date": "2023-06-15",
@@ -543,7 +547,7 @@ def test_sba_loan_pif_why_now_bonus_is_8():
     signal.evidence_id = evidence_id
     signal.signal_type = "SBA_LOAN_PIF"
     signal.signal_strength = "strong"
-    signal.freshness_score = Decimal("0.30")
+    signal.freshness_score = Decimal("0.85")
     signal.award_amount = Decimal("500000")
     signal.signal_date = date(2023, 6, 15)
 
@@ -614,7 +618,7 @@ def test_sba_loan_active_why_now_bonus_is_4():
     evidence.id = evidence_id
     evidence.source_url = "https://data.sba.gov/dataset/7-a-504-foia"
     evidence.claim_supported = "SBA_LOAN_ACTIVE"
-    evidence.freshness_score = Decimal("0.50")
+    evidence.freshness_score = Decimal("0.85")
     evidence.extracted_fields = {"award_amount": "100000", "action_date": "2024-01-10"}
 
     signal = MagicMock()
@@ -622,7 +626,7 @@ def test_sba_loan_active_why_now_bonus_is_4():
     signal.evidence_id = evidence_id
     signal.signal_type = "SBA_LOAN_ACTIVE"
     signal.signal_strength = "medium"
-    signal.freshness_score = Decimal("0.50")
+    signal.freshness_score = Decimal("0.85")
     signal.award_amount = Decimal("100000")
     signal.signal_date = date(2024, 1, 10)
 
@@ -809,3 +813,308 @@ def test_empty_csv_completes_cleanly():
     assert source_run.status == "completed"
     assert source_run.records_fetched == 0
     assert source_run.records_valid == 0
+
+
+# ─── B2C NAICS exclusion (621/622/623/624) ───────────────────────────────────
+
+
+def test_physician_office_naics_excluded():
+    """NAICS 621111 (Physician Offices) must be excluded — B2C patient billing."""
+    source_run, _ = _run_connector([_valid_row(naicscode="621111")])
+    assert source_run.records_skipped == 1
+    assert source_run.records_valid == 0
+
+
+def test_dental_office_naics_excluded():
+    """NAICS 621210 (Dental Offices) must be excluded — B2C patient billing."""
+    source_run, _ = _run_connector([_valid_row(naicscode="621210")])
+    assert source_run.records_skipped == 1
+    assert source_run.records_valid == 0
+
+
+def test_hospital_naics_excluded():
+    """NAICS 622110 (General Medical Hospitals) must be excluded — B2C."""
+    source_run, _ = _run_connector([_valid_row(naicscode="622110")])
+    assert source_run.records_skipped == 1
+    assert source_run.records_valid == 0
+
+
+def test_nursing_facility_naics_excluded():
+    """NAICS 623110 (Nursing Care Facilities) must be excluded — B2C."""
+    source_run, _ = _run_connector([_valid_row(naicscode="623110")])
+    assert source_run.records_skipped == 1
+    assert source_run.records_valid == 0
+
+
+def test_daycare_naics_excluded():
+    """NAICS 624410 (Child Day Care Services) must be excluded — B2C."""
+    source_run, _ = _run_connector([_valid_row(naicscode="624410")])
+    assert source_run.records_skipped == 1
+    assert source_run.records_valid == 0
+
+
+def test_is_excluded_naics_physician():
+    """_is_excluded_naics returns True for 621111 (physician office)."""
+    assert _is_excluded_naics("621111") is True
+
+
+def test_is_excluded_naics_hospital():
+    """_is_excluded_naics returns True for 622110 (hospital)."""
+    assert _is_excluded_naics("622110") is True
+
+
+def test_is_excluded_naics_manufacturing_not_excluded():
+    """_is_excluded_naics returns False for 332312 (manufacturing) — not healthcare."""
+    assert _is_excluded_naics("332312") is False
+
+
+def test_is_excluded_naics_none_returns_false():
+    """_is_excluded_naics returns False for None."""
+    assert _is_excluded_naics(None) is False
+
+
+# ─── Noise keyword filter ─────────────────────────────────────────────────────
+
+
+def test_dental_name_excluded():
+    """Company name containing 'dental' must be excluded — B2C noise keyword."""
+    source_run, _ = _run_connector([_valid_row(borrname="Atlanta Dental Group LLC")])
+    assert source_run.records_skipped == 1
+    assert source_run.records_valid == 0
+
+
+def test_daycare_name_excluded():
+    """Company name containing 'daycare' must be excluded — B2C noise keyword."""
+    source_run, _ = _run_connector([_valid_row(borrname="Sunshine Daycare LLC", naicscode="999999")])
+    # Note: 999999 fails NAICS inclusion filter first — use a valid NAICS to test keyword path
+    source_run2, _ = _run_connector([_valid_row(borrname="Sunshine Daycare LLC", naicscode="561320")])
+    assert source_run2.records_skipped == 1
+    assert source_run2.records_valid == 0
+
+
+def test_preschool_name_excluded():
+    """Company name containing 'preschool' must be excluded — B2C noise keyword."""
+    source_run, _ = _run_connector([_valid_row(borrname="Bright Minds Preschool Inc", naicscode="561320")])
+    assert source_run.records_skipped == 1
+    assert source_run.records_valid == 0
+
+
+def test_chiropractic_name_excluded():
+    """Company name containing 'chiropractic' must be excluded — B2C noise keyword."""
+    source_run, _ = _run_connector([_valid_row(borrname="Back Pain Chiropractic Center", naicscode="561320")])
+    assert source_run.records_skipped == 1
+    assert source_run.records_valid == 0
+
+
+def test_has_noise_keyword_dental():
+    """_has_noise_keyword returns True for 'dental' in name."""
+    assert _has_noise_keyword("Atlanta Dental Associates") is True
+
+
+def test_has_noise_keyword_case_insensitive():
+    """_has_noise_keyword is case-insensitive."""
+    assert _has_noise_keyword("PEDIATRIC SPECIALISTS LLC") is True
+
+
+def test_has_noise_keyword_clean_name():
+    """_has_noise_keyword returns False for a clean B2B company name."""
+    assert _has_noise_keyword("Legendary Supply Chain LLC") is False
+
+
+# ─── Freshness-tiered SBA why_now scoring ────────────────────────────────────
+
+
+def _make_sba_score_test_fixtures(signal_type: str, freshness: float):
+    """Build company + signal mocks for a scoring test. Returns (company_id, signal, config, db)."""
+    company_id = uuid.uuid4()
+    scoring_config_id = uuid.uuid4()
+
+    company = MagicMock()
+    company.id = company_id
+    company.naics_code = "561320"  # Staffing — not AR-heavy, isolates why_now from NAICS bonus
+    company.country = "US"
+    company.industry = "staffing"
+    company.business_type = None
+
+    evidence_id = uuid.uuid4()
+    evidence = MagicMock()
+    evidence.id = evidence_id
+    evidence.source_url = "https://data.sba.gov/dataset/7-a-504-foia"
+    evidence.claim_supported = signal_type
+    evidence.freshness_score = Decimal(str(freshness))
+    evidence.extracted_fields = {"award_amount": "100000", "action_date": "2024-01-10"}
+
+    signal = MagicMock()
+    signal.id = uuid.uuid4()
+    signal.evidence_id = evidence_id
+    signal.signal_type = signal_type
+    signal.signal_strength = "strong" if signal_type == "SBA_LOAN_PIF" else "medium"
+    signal.freshness_score = Decimal(str(freshness))
+    signal.award_amount = Decimal("100000")
+    signal.signal_date = date(2024, 1, 10)
+
+    config = MagicMock()
+    config.id = scoring_config_id
+    config.config_hash = "test_hash"
+
+    db = MagicMock()
+    db.get.return_value = company
+
+    def execute_side_effect(query):
+        result = MagicMock()
+        query_str = str(query)
+        if "evidence_items" in query_str.lower() or "EvidenceItem" in str(query):
+            result.scalars.return_value.all.return_value = [evidence]
+            result.scalars.return_value.first.return_value = None
+        elif "signals" in query_str.lower() or "Signal" in str(query):
+            result.scalars.return_value.all.return_value = [signal]
+            result.scalars.return_value.first.return_value = None
+        elif "scoring_configs" in query_str.lower() or "ScoringConfig" in str(query):
+            result.scalars.return_value.first.return_value = config
+        elif "lead_candidates" in query_str.lower() or "LeadCandidate" in str(query):
+            result.scalars.return_value.first.return_value = None
+        else:
+            result.scalars.return_value.all.return_value = []
+            result.scalars.return_value.first.return_value = None
+        return result
+
+    db.execute.side_effect = execute_side_effect
+    return company_id, db
+
+
+def _run_scoring(signal_type: str, freshness: float) -> dict:
+    from app.processing.scoring import score_company
+
+    company_id, db = _make_sba_score_test_fixtures(signal_type, freshness)
+    with patch("app.processing.scoring.evaluate_mandatory_gates") as mock_gates:
+        mock_gates.return_value = {
+            "passed": True,
+            "should_score": True,
+            "gate_name": None,
+            "gate_reason": None,
+            "route": "score",
+            "suppression": None,
+        }
+        with patch("app.processing.scoring.flag_excluded_sector"):
+            return score_company(company_id, db)
+
+
+def test_sba_pif_fresh_why_now_is_8():
+    """PIF signal with freshness >= 0.8 must contribute +8 to why_now."""
+    result = _run_scoring("SBA_LOAN_PIF", 0.85)
+    assert result["component_breakdown"]["why_now"]["points"] == 8
+
+
+def test_sba_pif_moderate_freshness_why_now_is_6():
+    """PIF signal with freshness 0.5–0.79 must contribute +6 to why_now."""
+    result = _run_scoring("SBA_LOAN_PIF", 0.65)
+    assert result["component_breakdown"]["why_now"]["points"] == 6
+
+
+def test_sba_pif_older_freshness_why_now_is_4():
+    """PIF signal with freshness 0.1–0.49 must contribute +4 to why_now."""
+    result = _run_scoring("SBA_LOAN_PIF", 0.30)
+    assert result["component_breakdown"]["why_now"]["points"] == 4
+
+
+def test_sba_active_fresh_why_now_is_4():
+    """ACTIVE signal with freshness >= 0.8 must contribute +4 to why_now."""
+    result = _run_scoring("SBA_LOAN_ACTIVE", 0.85)
+    assert result["component_breakdown"]["why_now"]["points"] == 4
+
+
+def test_sba_active_moderate_freshness_why_now_is_3():
+    """ACTIVE signal with freshness 0.5–0.79 must contribute +3 to why_now."""
+    result = _run_scoring("SBA_LOAN_ACTIVE", 0.60)
+    assert result["component_breakdown"]["why_now"]["points"] == 3
+
+
+def test_sba_active_older_freshness_why_now_is_2():
+    """ACTIVE signal with freshness 0.1–0.49 must contribute +2 to why_now."""
+    result = _run_scoring("SBA_LOAN_ACTIVE", 0.25)
+    assert result["component_breakdown"]["why_now"]["points"] == 2
+
+
+def test_sba_pif_scores_higher_than_active_same_freshness():
+    """PIF signals must always produce higher why_now than ACTIVE at same freshness."""
+    for freshness in (0.85, 0.65, 0.30):
+        pif = _run_scoring("SBA_LOAN_PIF", freshness)
+        active = _run_scoring("SBA_LOAN_ACTIVE", freshness)
+        pif_wn = pif["component_breakdown"]["why_now"]["points"]
+        active_wn = active["component_breakdown"]["why_now"]["points"]
+        assert pif_wn > active_wn, (
+            f"freshness={freshness}: PIF why_now={pif_wn} should exceed Active why_now={active_wn}"
+        )
+
+
+def test_sba_loan_contributes_to_ar_fit():
+    """An SBA signal must contribute the +3 lending bonus to ar_fit."""
+    from app.processing.scoring import score_company
+
+    company_id = uuid.uuid4()
+    company = MagicMock()
+    company.id = company_id
+    company.naics_code = "519190"  # Information sector 51 — not in _AR_HEAVY_NAICS
+    company.country = "US"
+    company.industry = "information"
+    company.business_type = None
+
+    evidence_id = uuid.uuid4()
+    evidence = MagicMock()
+    evidence.id = evidence_id
+    evidence.source_url = "https://data.sba.gov/dataset/7-a-504-foia"
+    evidence.claim_supported = "SBA_LOAN_PIF"
+    evidence.freshness_score = Decimal("0.85")
+    evidence.extracted_fields = {"award_amount": "100000", "action_date": "2024-01-10"}
+
+    signal = MagicMock()
+    signal.id = uuid.uuid4()
+    signal.evidence_id = evidence_id
+    signal.signal_type = "SBA_LOAN_PIF"
+    signal.signal_strength = "strong"
+    signal.freshness_score = Decimal("0.85")
+    signal.award_amount = Decimal("100000")
+    signal.signal_date = date(2024, 1, 10)
+
+    config = MagicMock()
+    config.id = uuid.uuid4()
+    config.config_hash = "ar_fit_test"
+
+    db = MagicMock()
+    db.get.return_value = company
+
+    def execute_side_effect(query):
+        result = MagicMock()
+        query_str = str(query)
+        if "evidence_items" in query_str.lower() or "EvidenceItem" in str(query):
+            result.scalars.return_value.all.return_value = [evidence]
+            result.scalars.return_value.first.return_value = None
+        elif "signals" in query_str.lower() or "Signal" in str(query):
+            result.scalars.return_value.all.return_value = [signal]
+            result.scalars.return_value.first.return_value = None
+        elif "scoring_configs" in query_str.lower() or "ScoringConfig" in str(query):
+            result.scalars.return_value.first.return_value = config
+        elif "lead_candidates" in query_str.lower() or "LeadCandidate" in str(query):
+            result.scalars.return_value.first.return_value = None
+        else:
+            result.scalars.return_value.all.return_value = []
+            result.scalars.return_value.first.return_value = None
+        return result
+
+    db.execute.side_effect = execute_side_effect
+
+    with patch("app.processing.scoring.evaluate_mandatory_gates") as mock_gates:
+        mock_gates.return_value = {
+            "passed": True,
+            "should_score": True,
+            "gate_name": None,
+            "gate_reason": None,
+            "route": "score",
+            "suppression": None,
+        }
+        with patch("app.processing.scoring.flag_excluded_sector"):
+            result = score_company(company_id, db)
+
+    # NAICS 519190 is NOT in _AR_HEAVY_NAICS (no +7), so ar_fit = 0 + 3 (lending signal) = 3
+    ar_points = result["component_breakdown"]["ar_fit"]["points"]
+    assert ar_points == 3, f"Expected ar_fit=3 (lending bonus only, non-AR NAICS), got {ar_points}"

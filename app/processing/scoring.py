@@ -57,13 +57,10 @@ _AR_HEAVY_NAICS = ("54", "56", "33", "48", "23", "62")
 # SUBCONTRACT_AWARD is emitted by the usaspending_subawards connector.
 _AWARD_SIGNAL_TYPES = frozenset({"CONTRACT_AWARD", "SUBCONTRACT_AWARD"})
 
-# SBA signal types and their fixed why_now bonuses.
-# Confirmed by John Cox Miller, Porter Capital, June 25 2026.
+# SBA signal types — bonuses scale with freshness (loan recency).
+# Max values confirmed by John Cox Miller, Porter Capital, June 25 2026:
+#   PIF max = 8, Active max = 4 (both capped by why_now ceiling of 30).
 _SBA_SIGNAL_TYPES = frozenset({"SBA_LOAN_PIF", "SBA_LOAN_ACTIVE"})
-_SBA_WHY_NOW_BONUS: dict[str, int] = {
-    "SBA_LOAN_PIF": 8,    # paid-off loan: demonstrated financing need, now scaling
-    "SBA_LOAN_ACTIVE": 4, # active lien on receivables: needs qualification call
-}
 
 # Phase 1 cap for A/R Financing Fit component.
 _AR_FIT_PHASE1_CAP = 10
@@ -75,6 +72,33 @@ _TIER_COLD = 35
 
 
 # ─── Pure helpers ─────────────────────────────────────────────────────────────
+
+
+def _sba_why_now_points(signal_type: str, freshness: float) -> int:
+    """Tiered why_now bonus for SBA signals based on loan type and recency.
+
+    Freshness 0.0–1.0 is computed from loan approval_date over a 5-year window,
+    so 2022 loans score ~0.1 and 2026 loans score ~1.0.
+
+    Max values (freshness=1.0): PIF=8, Active=4 — confirmed by John Cox Miller.
+    Using freshness tiers introduces score variation across the loan cohort.
+    """
+    if signal_type == "SBA_LOAN_PIF":
+        if freshness >= 0.8:
+            return 8
+        if freshness >= 0.5:
+            return 6
+        if freshness >= 0.1:
+            return 4
+        return 2
+    # SBA_LOAN_ACTIVE
+    if freshness >= 0.8:
+        return 4
+    if freshness >= 0.5:
+        return 3
+    if freshness >= 0.1:
+        return 2
+    return 1
 
 
 def _assign_tier(score: int) -> str:
@@ -235,12 +259,15 @@ def score_company(company_id: UUID, db: Session) -> dict:
         if wn_points > 0:
             wn_evidence.append(freshest.evidence_id)
 
-    # SBA why_now bonus: fixed by loan type, not freshness.
-    # Take the best (highest) bonus if multiple SBA signals exist.
+    # SBA why_now bonus: tiered by loan type and recency (freshness_score).
+    # Take the best (highest-scoring) SBA signal if multiple exist.
     sba_signals = [s for s in signals if s.signal_type in _SBA_SIGNAL_TYPES]
     if sba_signals:
-        best_sba = max(sba_signals, key=lambda s: _SBA_WHY_NOW_BONUS.get(s.signal_type, 0))
-        sba_bonus = _SBA_WHY_NOW_BONUS.get(best_sba.signal_type, 0)
+        best_sba = max(
+            sba_signals,
+            key=lambda s: _sba_why_now_points(s.signal_type, float(s.freshness_score or 0)),
+        )
+        sba_bonus = _sba_why_now_points(best_sba.signal_type, float(best_sba.freshness_score or 0))
         if sba_bonus > 0:
             wn_points = min(30, wn_points + sba_bonus)
             wn_evidence.append(best_sba.evidence_id)
@@ -261,9 +288,11 @@ def score_company(company_id: UUID, db: Session) -> dict:
         ar_points += 7
         ar_evidence.extend(all_evidence_ids)
 
-    if contract_signals:
+    # SBA loan signals are also evidence of A/R financing need.
+    lending_signals = contract_signals or [s for s in signals if s.signal_type in _SBA_SIGNAL_TYPES]
+    if lending_signals:
         ar_points += 3
-        ar_evidence.append(contract_signals[0].evidence_id)
+        ar_evidence.append(lending_signals[0].evidence_id)
 
     ar_points = min(ar_points, _AR_FIT_PHASE1_CAP)
 
