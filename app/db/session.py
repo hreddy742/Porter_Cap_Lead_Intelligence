@@ -6,6 +6,10 @@ All application code should use get_session() to get a Session.
 import os
 from collections.abc import Generator
 
+from dotenv import load_dotenv
+
+load_dotenv()  # no-op if env vars already set (Docker); loads .env for local runs
+
 from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 

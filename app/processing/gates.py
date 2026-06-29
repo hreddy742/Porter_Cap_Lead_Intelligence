@@ -30,7 +30,7 @@ logger = structlog.get_logger(__name__)
 
 OFAC_SDN_PATH = os.getenv(
     "OFAC_SDN_PATH",
-    r"C:\Users\hreddy\Search Intelligence\data\ofac_sdn.csv",
+    "data/ofac_sdn.csv",  # relative to CWD; override via OFAC_SDN_PATH env var
 )
 
 
@@ -85,10 +85,10 @@ def _load_ofac_sdn() -> frozenset[str]:
         logger.info("ofac_sdn_loaded", total_names=len(names), path=OFAC_SDN_PATH)
         return frozenset(names)
     except FileNotFoundError:
-        logger.warning(
+        logger.error(
             "ofac_file_not_found",
             path=OFAC_SDN_PATH,
-            note="Gate 11 OFAC screening disabled",
+            note="Gate 11 OFAC screening DISABLED — set OFAC_SDN_PATH to re-enable",
         )
         return frozenset()
 

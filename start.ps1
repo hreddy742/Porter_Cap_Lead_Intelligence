@@ -78,7 +78,7 @@ if ($frontendRunning.TcpTestSucceeded) {
 
 # Step 6 - SAM.gov enrichment
 Write-Step "Step 6 - Running SAM.gov daily enrichment"
-$env:OFAC_SDN_PATH = "C:\Users\hreddy\Search Intelligence\data\ofac_sdn.csv"
+$env:OFAC_SDN_PATH = "$ProjectRoot\data\ofac_sdn.csv"
 $harshaKey = ""
 $kateKey = ""
 if (Test-Path "$ProjectRoot\.env") {
