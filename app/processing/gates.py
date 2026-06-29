@@ -10,9 +10,13 @@ engine, push to Salesforce, or delete anything.
 """
 from __future__ import annotations
 
+import csv
 import os
+import re
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
+from functools import lru_cache
+from typing import NamedTuple
 from uuid import UUID
 
 import structlog
@@ -23,6 +27,110 @@ from app.db.models import Company, EvidenceItem, LeadCandidate, Signal
 from app.processing.suppression import check_suppression
 
 logger = structlog.get_logger(__name__)
+
+OFAC_SDN_PATH = os.getenv(
+    "OFAC_SDN_PATH",
+    r"C:\Users\hreddy\Search Intelligence\data\ofac_sdn.csv",
+)
+
+
+class OFACResult(NamedTuple):
+    passed: bool
+    reason: str | None = None
+    is_warning: bool = False
+
+
+def _normalize_ofac_name(name: str) -> str:
+    """Uppercase, strip punctuation, strip TRUE legal suffixes only, collapse whitespace.
+
+    Only strips legal entity designators (LLC, INC, CORP, etc.) — NOT descriptive words
+    like GROUP, GLOBAL, SERVICES.  Stripping descriptive words collapses real company
+    names to single generic tokens (e.g. "GLOBAL TECHNOLOGY CORP" → "TECHNOLOGY")
+    causing false-positive matches on legitimate companies.
+    """
+    name = name.upper()
+    name = re.sub(r'[^\w\s]', ' ', name)
+    for suffix in (
+        'LLC', 'INC', 'CORP', 'LTD', 'CO',
+        'COMPANY', 'CORPORATION', 'LIMITED',
+        'LP', 'LLP', 'PLC',
+    ):
+        name = re.sub(rf'\b{suffix}\b', '', name)
+    return re.sub(r'\s+', ' ', name).strip()
+
+
+@lru_cache(maxsize=1)
+def _load_ofac_sdn() -> frozenset[str]:
+    """
+    Load OFAC SDN list into a frozenset of normalized names.
+    File format (no header):  col 0 = SDN ID, col 1 = entity name, col 11 = remarks.
+    Aliases in remarks are extracted from a.k.a. "NAME" patterns.
+    Returns empty frozenset if file not found — gate is disabled, not crashed.
+    """
+    names: set[str] = set()
+    try:
+        with open(OFAC_SDN_PATH, encoding='utf-8', errors='replace', newline='') as f:
+            reader = csv.reader(f)
+            for row in reader:
+                if len(row) > 1 and row[1] and row[1] != '-0-':
+                    names.add(_normalize_ofac_name(row[1]))
+                if len(row) > 11 and row[11] and row[11] != '-0-':
+                    for alias in re.findall(
+                        r'a\.k\.a\.\s*["\']([^"\']+)["\']',
+                        row[11],
+                        re.IGNORECASE,
+                    ):
+                        if alias and alias != '-0-':
+                            names.add(_normalize_ofac_name(alias))
+        logger.info("ofac_sdn_loaded", total_names=len(names), path=OFAC_SDN_PATH)
+        return frozenset(names)
+    except FileNotFoundError:
+        logger.warning(
+            "ofac_file_not_found",
+            path=OFAC_SDN_PATH,
+            note="Gate 11 OFAC screening disabled",
+        )
+        return frozenset()
+
+
+def gate_11_ofac_screening(company_name: str) -> OFACResult:
+    """
+    Gate 11 — OFAC SDN Screening (hard block).
+
+    Checks company name against the US Treasury Office of Foreign Assets Control
+    Specially Designated Nationals list.  A match means Porter Capital is legally
+    prohibited from doing business with this entity.
+
+    Returns FAIL if match found (exact or partial ≥ 8 chars).
+    Returns PASS with is_warning=True if SDN file not found (gate disabled).
+    Confirmed by John Cox Miller — Porter Capital compliance requirement, June 2026.
+    """
+    if not company_name:
+        return OFACResult(passed=True)
+
+    ofac_names = _load_ofac_sdn()
+
+    if not ofac_names:
+        return OFACResult(
+            passed=True,
+            reason="OFAC file not found — screening disabled",
+            is_warning=True,
+        )
+
+    normalized = _normalize_ofac_name(company_name)
+
+    if normalized in ofac_names:
+        return OFACResult(passed=False, reason=f"OFAC SDN exact match: {company_name}")
+
+    for ofac_name in ofac_names:
+        if len(ofac_name) >= 12 and ofac_name in normalized:
+            return OFACResult(
+                passed=False,
+                reason=f"OFAC SDN partial match: {ofac_name} in {company_name}",
+            )
+
+    return OFACResult(passed=True)
+
 
 # Prefixes for the soft-flag (Phase 2B ICP policy, confirmed by John Cox Miller June 24 2026).
 # Leads in these sectors are scored and stored normally but hidden from sales by default.
@@ -214,6 +322,23 @@ def evaluate_mandatory_gates(company_id: UUID, db: Session) -> dict:
             recent_total += amt
     if largest_single < _min_single and recent_total < _min_90d:
         return _gated("award_amount_too_small", "archive")
+
+    # Gate 11 — OFAC SDN screening (hard block)
+    ofac = gate_11_ofac_screening(company.canonical_name)
+    if not ofac.passed:
+        logger.warning(
+            "gate_11_ofac_match",
+            company=company.canonical_name,
+            reason=ofac.reason,
+        )
+        return {
+            "passed": False,
+            "gate_name": "ofac_sdn_match",
+            "gate_reason": ofac.reason or "ofac_sdn_match",
+            "route": "hard_block",
+            "should_score": False,
+            "suppression": suppression,
+        }
 
     # All gates passed — company may proceed to scoring
     return {
