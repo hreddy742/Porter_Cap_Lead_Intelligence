@@ -36,45 +36,78 @@ export default function Sidebar() {
         transition: "width 0.2s ease",
       }}
     >
-      {/* Brand */}
+      {/* Brand + collapse toggle row */}
       <div
         style={{
           display: "flex",
           alignItems: "center",
-          gap: 10,
-          padding: collapsed ? "18px 9px 16px" : "18px 18px 16px",
-          justifyContent: collapsed ? "center" : "flex-start",
+          gap: 8,
+          padding: collapsed ? "14px 8px" : "14px 10px 14px 18px",
+          justifyContent: collapsed ? "center" : "space-between",
           flexShrink: 0,
         }}
       >
-        <div
+        {/* PC logo + name */}
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0 }}>
+          <div
+            style={{
+              width: 30,
+              height: 30,
+              flexShrink: 0,
+              borderRadius: 7,
+              background: "#FAFAFA",
+              color: "#09090B",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              fontSize: 12,
+              fontWeight: 700,
+              letterSpacing: "0.02em",
+            }}
+          >
+            PC
+          </div>
+          {!collapsed && (
+            <div style={{ minWidth: 0 }}>
+              <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.1, whiteSpace: "nowrap" }}>
+                Porter Capital
+              </div>
+              <div style={{ fontSize: 10, color: "rgba(250,250,250,0.42)", marginTop: 2 }}>
+                Birmingham · AL
+              </div>
+            </div>
+          )}
+        </div>
+
+        {/* Collapse toggle */}
+        <button
+          onClick={toggle}
+          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
           style={{
-            width: 30,
-            height: 30,
+            width: 26,
+            height: 26,
             flexShrink: 0,
-            borderRadius: 7,
-            background: "#FAFAFA",
-            color: "#09090B",
+            borderRadius: 6,
+            border: "0.5px solid rgba(250,250,250,0.15)",
+            background: "rgba(250,250,250,0.07)",
+            color: "rgba(250,250,250,0.55)",
+            cursor: "pointer",
             display: "flex",
             alignItems: "center",
             justifyContent: "center",
             fontSize: 12,
-            fontWeight: 700,
-            letterSpacing: "0.02em",
+            outline: "none",
+            transition: "background 0.1s",
+          }}
+          onMouseEnter={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.background = "rgba(250,250,250,0.14)";
+          }}
+          onMouseLeave={(e) => {
+            (e.currentTarget as HTMLButtonElement).style.background = "rgba(250,250,250,0.07)";
           }}
         >
-          PC
-        </div>
-        {!collapsed && (
-          <div style={{ minWidth: 0, flex: 1 }}>
-            <div style={{ fontSize: 13, fontWeight: 600, lineHeight: 1.1, whiteSpace: "nowrap" }}>
-              Porter Capital
-            </div>
-            <div style={{ fontSize: 10, color: "rgba(250,250,250,0.42)", marginTop: 2 }}>
-              Birmingham · AL
-            </div>
-          </div>
-        )}
+          {collapsed ? "→" : "←"}
+        </button>
       </div>
 
       <div style={{ height: "0.5px", background: "rgba(250,250,250,0.10)", margin: "0 10px", flexShrink: 0 }} />
@@ -117,45 +150,6 @@ export default function Sidebar() {
 
       {/* Spacer */}
       <div style={{ flex: 1 }} />
-
-      {/* Collapse toggle */}
-      <div
-        style={{
-          padding: collapsed ? "8px 0" : "8px 12px",
-          display: "flex",
-          justifyContent: collapsed ? "center" : "flex-end",
-          flexShrink: 0,
-        }}
-      >
-        <button
-          onClick={toggle}
-          title={collapsed ? "Expand sidebar" : "Collapse sidebar"}
-          style={{
-            width: 26,
-            height: 26,
-            borderRadius: 6,
-            border: "0.5px solid rgba(250,250,250,0.15)",
-            background: "rgba(250,250,250,0.07)",
-            color: "rgba(250,250,250,0.45)",
-            cursor: "pointer",
-            display: "flex",
-            alignItems: "center",
-            justifyContent: "center",
-            fontSize: 11,
-            outline: "none",
-            transition: "background 0.1s",
-            flexShrink: 0,
-          }}
-          onMouseEnter={(e) => {
-            (e.currentTarget as HTMLButtonElement).style.background = "rgba(250,250,250,0.14)";
-          }}
-          onMouseLeave={(e) => {
-            (e.currentTarget as HTMLButtonElement).style.background = "rgba(250,250,250,0.07)";
-          }}
-        >
-          {collapsed ? "→" : "←"}
-        </button>
-      </div>
 
       {/* Bottom */}
       {!collapsed && (
