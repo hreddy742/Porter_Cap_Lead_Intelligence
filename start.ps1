@@ -17,6 +17,15 @@ Write-Host "Porter Capital Lead Intelligence Platform" -ForegroundColor White
 Write-Host "Starting all services..." -ForegroundColor Gray
 Write-Host ""
 
+# Step 0 - Database backup
+Write-Step "Step 0 - Backing up database"
+python scripts/backup_db.py
+if ($LASTEXITCODE -eq 0) {
+    Write-Ok "Database backed up"
+} else {
+    Write-Warn "Backup failed - continuing anyway"
+}
+
 # Step 1 - Docker Desktop
 Write-Step "Step 1 - Checking Docker Desktop"
 $docker = Get-Process "Docker Desktop" -ErrorAction SilentlyContinue
