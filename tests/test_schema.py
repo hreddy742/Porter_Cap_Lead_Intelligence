@@ -22,20 +22,30 @@ from sqlalchemy import text
 @pytest.mark.db
 def test_migration_round_trip(postgres_container):
     """Alembic upgrade → downgrade → upgrade must all succeed cleanly."""
+    import os
     from alembic import command
     from alembic.config import Config
     from sqlalchemy import create_engine
 
     engine = create_engine(postgres_container.get_connection_url())
-    cfg = Config("alembic.ini")
-    cfg.set_main_option(
-        "sqlalchemy.url",
-        engine.url.render_as_string(hide_password=False),
-    )
+    test_url = engine.url.render_as_string(hide_password=False)
 
-    command.upgrade(cfg, "head")
-    command.downgrade(cfg, "base")
-    command.upgrade(cfg, "head")  # Must succeed a second time
+    cfg = Config("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", test_url)
+
+    # Pin DATABASE_URL so alembic/env.py uses the testcontainer URL instead of
+    # falling back to alembic.ini (localhost:5432/porter_leads = live DB).
+    _prev = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = test_url
+    try:
+        command.upgrade(cfg, "head")
+        command.downgrade(cfg, "base")
+        command.upgrade(cfg, "head")  # Must succeed a second time
+    finally:
+        if _prev is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = _prev
 
     engine.dispose()
 

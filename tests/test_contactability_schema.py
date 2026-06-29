@@ -184,20 +184,30 @@ def test_contactability_score_check_rejects_out_of_range(db_session):
 @pytest.mark.db
 def test_migration_round_trip_includes_contactability(postgres_container):
     """upgrade → downgrade → upgrade must succeed — verifies 002 migration."""
+    import os
     from alembic import command
     from alembic.config import Config
     from sqlalchemy import create_engine
 
     engine = create_engine(postgres_container.get_connection_url())
-    cfg = Config("alembic.ini")
-    cfg.set_main_option(
-        "sqlalchemy.url",
-        engine.url.render_as_string(hide_password=False),
-    )
+    test_url = engine.url.render_as_string(hide_password=False)
 
-    command.upgrade(cfg, "head")
-    command.downgrade(cfg, "base")
-    command.upgrade(cfg, "head")
+    cfg = Config("alembic.ini")
+    cfg.set_main_option("sqlalchemy.url", test_url)
+
+    # Pin DATABASE_URL so alembic/env.py uses the testcontainer URL and never
+    # falls back to the live database in alembic.ini.
+    _prev = os.environ.get("DATABASE_URL")
+    os.environ["DATABASE_URL"] = test_url
+    try:
+        command.upgrade(cfg, "head")
+        command.downgrade(cfg, "base")
+        command.upgrade(cfg, "head")
+    finally:
+        if _prev is None:
+            os.environ.pop("DATABASE_URL", None)
+        else:
+            os.environ["DATABASE_URL"] = _prev
 
     with engine.connect() as conn:
         for table in ("contactability_runs", "company_contactability"):
