@@ -5,7 +5,39 @@ testcontainers spins up a real Postgres instance for DB tests.
 Unit tests (like normalize) don't need it — they run without Docker.
 """
 
+import os
+
 import pytest
+
+
+def pytest_configure(config):
+    """Hard safety check — abort immediately if DATABASE_URL points to the live DB.
+
+    The test suite runs alembic downgrade('base') which drops every table.
+    If DATABASE_URL is set to localhost/porter_leads, that downgrade runs
+    against the production database and destroys all data.  This check fires
+    before any fixture or test executes so the mistake is caught at startup.
+
+    To run tests safely: unset DATABASE_URL first.
+      PowerShell : Remove-Item Env:DATABASE_URL
+      bash/zsh   : unset DATABASE_URL
+    """
+    db_url = os.environ.get("DATABASE_URL", "")
+    if "porter_leads" in db_url and "localhost" in db_url:
+        pytest.exit(
+            reason=(
+                "\n"
+                "SAFETY BLOCK: Tests are configured to run against the live database\n"
+                "(DATABASE_URL contains 'localhost' and 'porter_leads').\n"
+                "Running the test suite would execute alembic downgrade('base'),\n"
+                "dropping every table and destroying all production data.\n"
+                "\n"
+                "Unset DATABASE_URL before running pytest:\n"
+                "  PowerShell : Remove-Item Env:DATABASE_URL\n"
+                "  bash/zsh   : unset DATABASE_URL\n"
+            ),
+            returncode=1,
+        )
 
 
 # ─── DB fixtures (only needed for schema/integration tests) ────────────────────

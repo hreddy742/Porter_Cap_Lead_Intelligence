@@ -8,6 +8,16 @@ An internal pipeline that discovers B2B companies that may need A/R financing,
 scores and classifies them as leads, routes the best ones through human review,
 and pushes approved leads to Salesforce. Every lead is traceable to evidence.
 
+## DANGER: Running pytest with DATABASE_URL set to the live DB wipes all data
+The test suite calls `alembic downgrade("base")` which drops every table.
+**Always unset DATABASE_URL before running pytest:**
+```
+PowerShell : Remove-Item Env:DATABASE_URL
+bash/zsh   : unset DATABASE_URL
+```
+A hard safety check in `tests/conftest.py::pytest_configure` blocks pytest immediately
+if `DATABASE_URL` contains both `"localhost"` and `"porter_leads"`. Never bypass it.
+
 ## Six founding rules — never violate these
 1. No score point without a citing `evidence_id` → raise `ScoringIntegrityError` if violated
 2. No company merge without a hard identifier match (UEI / domain / state_entity_id only)
