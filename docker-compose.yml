@@ -27,11 +27,13 @@ services:
       PIPELINE_INTERVAL_HOURS: "4"
       MIN_QUALIFYING_SINGLE_AWARD_AMOUNT: "50000"
       MIN_QUALIFYING_COMPANY_90D_AWARD_TOTAL: "50000"
+      OFAC_SDN_PATH: /ofac_data/ofac_sdn.csv
     depends_on:
       db:
         condition: service_healthy
     volumes:
       - .:/app           # mount source for development
+      - "C:/Users/hreddy/Search Intelligence/data:/ofac_data:ro"
     command: python -m scripts.run_pipeline
     restart: unless-stopped
 

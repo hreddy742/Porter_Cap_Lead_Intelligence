@@ -196,6 +196,23 @@ class TestPartialAndAliasMatching:
         # Partial match: "IRAN AIR" (8 chars) < 12 threshold → not checked → passes
         assert result.passed is True
 
+    def test_word_boundary_prevents_false_positive(self):
+        # "AM LOGISTICS" (12 chars) must NOT match "BARTRAM LOGISTICS" — the
+        # "AM" in "BARTRAM" is not a word boundary, so \bAM LOGISTICS\b fails.
+        sdn = frozenset({"AM LOGISTICS"})
+        with _patch_sdn(sdn):
+            result = gate_11_ofac_screening("BARTRAM LOGISTICS LLC")
+        assert result.passed is True, (
+            "Word-boundary check failed: BARTRAM LOGISTICS incorrectly matched AM LOGISTICS"
+        )
+
+    def test_word_boundary_still_catches_real_match(self):
+        # "AM LOGISTICS" must still block a company that actually starts with it
+        sdn = frozenset({"AM LOGISTICS"})
+        with _patch_sdn(sdn):
+            result = gate_11_ofac_screening("AM LOGISTICS INTERNATIONAL INC")
+        assert result.passed is False
+
     def test_exact_match_returns_correct_reason(self):
         with _patch_sdn(_KNOWN_SDN_NAMES):
             result = gate_11_ofac_screening("AEROCARIBBEAN AIRLINES")

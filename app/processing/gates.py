@@ -123,7 +123,10 @@ def gate_11_ofac_screening(company_name: str) -> OFACResult:
         return OFACResult(passed=False, reason=f"OFAC SDN exact match: {company_name}")
 
     for ofac_name in ofac_names:
-        if len(ofac_name) >= 12 and ofac_name in normalized:
+        # Word-boundary regex prevents "AM LOGISTICS" from matching inside "BARTRAM LOGISTICS"
+        if len(ofac_name) >= 12 and re.search(
+            rf'\b{re.escape(ofac_name)}\b', normalized
+        ):
             return OFACResult(
                 passed=False,
                 reason=f"OFAC SDN partial match: {ofac_name} in {company_name}",
