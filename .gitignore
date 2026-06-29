@@ -52,8 +52,8 @@ data/ofac_sdn.csv
 # Exports — keep directory tracked, ignore generated CSVs
 exports/*.csv
 
-# Backups — keep directory tracked, ignore generated SQL dumps
-backups/*.sql
+# Backups — ignore entirely
+backups/
 
 # Runtime output artifacts
 outputs/
