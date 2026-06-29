@@ -11,6 +11,7 @@ import {
 import { TierBadge } from "@/components/ui/TierBadge";
 import { StatusBadge } from "@/components/ui/StatusBadge";
 import { EmptyState } from "@/components/ui/EmptyState";
+import ReviewPanel from "@/components/leads/ReviewPanel";
 import {
   ChevronLeft,
   AlertTriangle,
@@ -408,6 +409,7 @@ export default async function LeadDetailPage({
                 </p>
               </div>
             )}
+            <ReviewPanel leadId={lead.lead_id} />
           </div>
         </div>
 

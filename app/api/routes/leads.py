@@ -10,6 +10,8 @@ from app.api.schemas import (
     LeadListItemSchema,
     LeadsListResponse,
     ReviewDecisionSchema,
+    ReviewRequest,
+    ReviewResponse,
     ScoreDetailSchema,
     SignalSchema,
 )
@@ -18,8 +20,9 @@ from app.dashboard.review import (
     get_lead_detail,
     get_latest_run_context,
     list_leads_filtered,
+    submit_lead_review,
 )
-from app.db.models import EvidenceItem, Signal
+from app.db.models import EvidenceItem, LeadCandidate, Signal
 from app.db.session import get_session
 
 router = APIRouter()
@@ -157,6 +160,33 @@ def list_leads(
         limit=limit,
         offset=offset,
         warning=_WARNING,
+    )
+
+
+@router.post("/leads/{lead_id}/review", response_model=ReviewResponse)
+def create_lead_review(
+    lead_id: UUID,
+    body: ReviewRequest,
+    db: Session = Depends(get_session),
+) -> ReviewResponse:
+    lead = db.get(LeadCandidate, lead_id)
+    if lead is None:
+        raise HTTPException(status_code=404, detail="Lead not found")
+    try:
+        review = submit_lead_review(
+            lead_candidate_id=lead_id,
+            decision=body.decision,
+            note=body.note,
+            reviewer=body.reviewer,
+            db=db,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    return ReviewResponse(
+        lead_id=str(lead_id),
+        decision=body.decision,
+        reviewed_at=str(review.decided_at),
+        note=body.note,
     )
 
 

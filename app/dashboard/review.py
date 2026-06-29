@@ -43,6 +43,14 @@ VALID_ACTIONS = frozenset({
     "add_note",
 })
 
+REVIEW_DECISIONS = frozenset({
+    "approved",
+    "rejected",
+    "contacted",
+    "qualified",
+    "passed",
+})
+
 
 def get_reviewer_id(headers: dict | None = None) -> str | None:
     """Read reviewer identity from the X-Forwarded-Email header.
@@ -96,6 +104,44 @@ def create_review_decision(
     db.add(decision)
     db.commit()
     return decision
+
+
+def submit_lead_review(
+    lead_candidate_id: UUID,
+    decision: str,
+    note: str | None,
+    reviewer: str,
+    db: Session,
+) -> ReviewDecision:
+    """Submit a human review decision for a lead.
+
+    Append-only: inserts a new ReviewDecision row.
+    Also updates LeadCandidate.sales_status to the decision value.
+
+    Raises:
+        ValueError: if reviewer is blank or decision is not in REVIEW_DECISIONS.
+    """
+    if not reviewer or not reviewer.strip():
+        raise ValueError("reviewer is required")
+    if decision not in REVIEW_DECISIONS:
+        raise ValueError(f"Invalid decision {decision!r}. Must be one of: {sorted(REVIEW_DECISIONS)}")
+
+    lead = db.get(LeadCandidate, lead_candidate_id)
+    if lead is None:
+        raise ValueError(f"Lead {lead_candidate_id} not found")
+
+    review = ReviewDecision(
+        id=uuid.uuid4(),
+        lead_candidate_id=lead_candidate_id,
+        action=decision,
+        note=note,
+        reviewer_id=reviewer,
+    )
+    db.add(review)
+    lead.sales_status = decision
+    db.commit()
+    db.refresh(review)
+    return review
 
 
 def list_reviewable_leads(db: Session, tier: str | None = None) -> list:

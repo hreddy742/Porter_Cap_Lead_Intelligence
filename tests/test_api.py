@@ -211,6 +211,144 @@ class TestNoWriteEndpoints:
 
 # ── signal_type field ─────────────────────────────────────────────────────────
 
+@pytest.mark.db
+class TestLeadReview:
+    def _make_lead(self, db_session):
+        import uuid as uuid_mod
+        from app.db.models import Company, LeadCandidate
+
+        company = Company(
+            id=uuid_mod.uuid4(),
+            canonical_name=f"Review Test Co {uuid_mod.uuid4().hex[:6]}",
+            normalized_name="review test co",
+            external_id=f"revtest{uuid_mod.uuid4().hex[:8]}",
+            country="US",
+        )
+        db_session.add(company)
+        db_session.flush()
+
+        lead = LeadCandidate(
+            id=uuid_mod.uuid4(),
+            company_id=company.id,
+            status="active",
+            tier="warm",
+            current_score=55,
+            sales_status="research",
+        )
+        db_session.add(lead)
+        db_session.flush()
+        return company, lead
+
+    def test_approve_returns_200(self, client, db_session):
+        _, lead = self._make_lead(db_session)
+        r = client.post(f"/api/leads/{lead.id}/review", json={"decision": "approved"})
+        assert r.status_code == 200
+
+    def test_reject_returns_200(self, client, db_session):
+        _, lead = self._make_lead(db_session)
+        r = client.post(f"/api/leads/{lead.id}/review", json={"decision": "rejected"})
+        assert r.status_code == 200
+
+    def test_contacted_returns_200(self, client, db_session):
+        _, lead = self._make_lead(db_session)
+        r = client.post(f"/api/leads/{lead.id}/review", json={"decision": "contacted"})
+        assert r.status_code == 200
+
+    def test_invalid_decision_returns_422(self, client, db_session):
+        _, lead = self._make_lead(db_session)
+        r = client.post(f"/api/leads/{lead.id}/review", json={"decision": "nuke_it"})
+        assert r.status_code == 422
+
+    def test_nonexistent_lead_returns_404(self, client):
+        r = client.post(f"/api/leads/{uuid.uuid4()}/review", json={"decision": "approved"})
+        assert r.status_code == 404
+
+    def test_response_contains_lead_id_and_decision(self, client, db_session):
+        _, lead = self._make_lead(db_session)
+        r = client.post(f"/api/leads/{lead.id}/review", json={"decision": "qualified"})
+        data = r.json()
+        assert data["lead_id"] == str(lead.id)
+        assert data["decision"] == "qualified"
+        assert "reviewed_at" in data
+
+    def test_review_creates_db_record(self, client, db_session):
+        from sqlalchemy import select
+        from app.db.models import ReviewDecision
+
+        _, lead = self._make_lead(db_session)
+        lead_id = lead.id
+        client.post(f"/api/leads/{lead_id}/review", json={"decision": "contacted"})
+
+        db_session.expire_all()
+        decisions = db_session.execute(
+            select(ReviewDecision).where(ReviewDecision.lead_candidate_id == lead_id)
+        ).scalars().all()
+        assert len(decisions) == 1
+        assert decisions[0].action == "contacted"
+
+    def test_second_review_appends_not_updates(self, client, db_session):
+        from sqlalchemy import select
+        from app.db.models import ReviewDecision
+
+        _, lead = self._make_lead(db_session)
+        lead_id = lead.id
+        client.post(f"/api/leads/{lead_id}/review", json={"decision": "contacted"})
+        client.post(f"/api/leads/{lead_id}/review", json={"decision": "approved"})
+
+        db_session.expire_all()
+        decisions = db_session.execute(
+            select(ReviewDecision).where(ReviewDecision.lead_candidate_id == lead_id)
+        ).scalars().all()
+        assert len(decisions) == 2, "append-only: must create new row, not update"
+
+    def test_sales_status_updated_after_review(self, client, db_session):
+        from app.db.models import LeadCandidate as LC
+
+        _, lead = self._make_lead(db_session)
+        lead_id = lead.id
+        client.post(f"/api/leads/{lead_id}/review", json={"decision": "approved"})
+
+        db_session.expire_all()
+        updated = db_session.get(LC, lead_id)
+        assert updated.sales_status == "approved"
+
+    def test_review_history_visible_in_get_lead(self, client, db_session):
+        _, lead = self._make_lead(db_session)
+        client.post(
+            f"/api/leads/{lead.id}/review",
+            json={"decision": "approved", "note": "promising"},
+        )
+        db_session.expire_all()
+        r = client.get(f"/api/leads/{lead.id}")
+        assert r.status_code == 200
+        data = r.json()
+        assert len(data["review_history"]) == 1
+        assert data["review_history"][0]["action"] == "approved"
+        assert data["review_history"][0]["note"] == "promising"
+
+    def test_note_is_optional(self, client, db_session):
+        _, lead = self._make_lead(db_session)
+        r = client.post(f"/api/leads/{lead.id}/review", json={"decision": "passed"})
+        assert r.status_code == 200
+        assert r.json()["note"] is None
+
+    def test_custom_reviewer_stored(self, client, db_session):
+        from sqlalchemy import select
+        from app.db.models import ReviewDecision
+
+        _, lead = self._make_lead(db_session)
+        lead_id = lead.id
+        client.post(
+            f"/api/leads/{lead_id}/review",
+            json={"decision": "approved", "reviewer": "Jane Smith"},
+        )
+        db_session.expire_all()
+        dec = db_session.execute(
+            select(ReviewDecision).where(ReviewDecision.lead_candidate_id == lead_id)
+        ).scalars().first()
+        assert dec.reviewer_id == "Jane Smith"
+
+
 class TestSignalTypeField:
     """signal_type appears in leads list items; None when no award signal exists."""
 

@@ -1,13 +1,6 @@
 import { fetchLeads, fetchSummary } from "@/lib/api";
 import LeadsContainer from "@/components/leads/LeadsContainer";
 
-function fmtMoney(total: number): string {
-  if (total >= 1_000_000_000) return `$${(total / 1_000_000_000).toFixed(2)}B`;
-  if (total >= 1_000_000) return `$${(total / 1_000_000).toFixed(2)}M`;
-  if (total >= 1_000) return `$${(total / 1_000).toFixed(0)}K`;
-  return `$${total.toFixed(0)}`;
-}
-
 function lastRunAgo(finishedAt: string | null | undefined): string {
   if (!finishedAt) return "—";
   const ms = Date.now() - new Date(finishedAt).getTime();
@@ -37,11 +30,9 @@ interface StatCardProps {
   value: string;
   sub: string;
   borderColor: string;
-  deltaLabel?: string;
-  deltaUp?: boolean;
 }
 
-function StatCard({ label, value, sub, borderColor, deltaLabel, deltaUp }: StatCardProps) {
+function StatCard({ label, value, sub, borderColor }: StatCardProps) {
   return (
     <div
       style={{
@@ -52,34 +43,16 @@ function StatCard({ label, value, sub, borderColor, deltaLabel, deltaUp }: StatC
         padding: "16px 18px",
       }}
     >
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
-        <div
-          style={{
-            fontSize: 10,
-            fontWeight: 600,
-            textTransform: "uppercase",
-            letterSpacing: "0.08em",
-            color: "#71717A",
-          }}
-        >
-          {label}
-        </div>
-        {deltaLabel && (
-          <div
-            style={{
-              fontFamily: "var(--font-data, Inter, sans-serif)",
-              fontSize: 10,
-              fontWeight: 600,
-              fontVariantNumeric: "tabular-nums",
-              padding: "1px 6px",
-              borderRadius: 999,
-              background: deltaUp ? "rgba(22,163,74,0.10)" : "rgba(220,38,38,0.10)",
-              color: deltaUp ? "#16A34A" : "#DC2626",
-            }}
-          >
-            {deltaLabel}
-          </div>
-        )}
+      <div
+        style={{
+          fontSize: 10,
+          fontWeight: 600,
+          textTransform: "uppercase",
+          letterSpacing: "0.08em",
+          color: "#71717A",
+        }}
+      >
+        {label}
       </div>
       <div
         style={{
@@ -99,10 +72,44 @@ function StatCard({ label, value, sub, borderColor, deltaLabel, deltaUp }: StatC
   );
 }
 
-export default async function LeadsPage() {
+const VALID_PER_PAGE = [25, 50, 100] as const;
+
+export default async function LeadsPage({
+  searchParams,
+}: {
+  searchParams: Promise<Record<string, string>>;
+}) {
+  const sp = await searchParams;
+
+  // Parse pagination params
+  const rawPage = parseInt(sp.page ?? "1", 10);
+  const page = isNaN(rawPage) || rawPage < 1 ? 1 : rawPage;
+  const rawPerPage = parseInt(sp.per_page ?? "50", 10);
+  const perPage: 25 | 50 | 100 = VALID_PER_PAGE.includes(rawPerPage as 25 | 50 | 100)
+    ? (rawPerPage as 25 | 50 | 100)
+    : 50;
+  const offset = (page - 1) * perPage;
+
+  // Parse filter params
+  const activeTier = sp.tier ?? "";
+  const activeSignal = sp.signal ?? "";
+  const activeStatus = sp.status ?? "";
+  const includeExcluded = sp.include_excluded === "true";
+  const sortBy = sp.sort_by ?? "score_desc";
+
+  const apiParams: Record<string, string> = {
+    limit: String(perPage),
+    offset: String(offset),
+    sort_by: sortBy,
+    include_excluded: String(includeExcluded),
+  };
+  if (activeTier) apiParams.tier = activeTier;
+  if (activeSignal) apiParams.signal_type = activeSignal;
+  if (activeStatus) apiParams.sales_status = activeStatus;
+
   const [summaryResult, dataResult] = await Promise.allSettled([
     fetchSummary(),
-    fetchLeads({ limit: "50000", sort_by: "score_desc", include_excluded: "true" }),
+    fetchLeads(apiParams),
   ]);
 
   const summary = summaryResult.status === "fulfilled" ? summaryResult.value : null;
@@ -116,48 +123,35 @@ export default async function LeadsPage() {
 
   const leads = data?.items ?? [];
   const total = data?.total ?? 0;
-
-  const pipelineTotal = leads
-    .filter((l) => !l.sector_excluded)
-    .reduce((sum, l) => sum + (l.max_award_amount ? parseFloat(l.max_award_amount) : 0), 0);
-
-  const pipelineCount = leads.filter((l) => !l.sector_excluded).length;
   const finishedAt = summary?.run_context?.finished_at ?? null;
 
   return (
     <div style={{ display: "flex", flexDirection: "column", flex: 1, minHeight: 0 }}>
       {/* Page header */}
-      <div
-        style={{
-          padding: "24px 24px 0",
-          flexShrink: 0,
-        }}
-      >
-        <div>
-          <h1
-            style={{
-              margin: 0,
-              fontSize: 16,
-              fontWeight: 500,
-              letterSpacing: "-0.02em",
-              color: "#09090B",
-            }}
-          >
-            Active Leads
-          </h1>
-          <div
-            style={{
-              fontSize: 11,
-              color: "#71717A",
-              marginTop: 5,
-              fontVariantNumeric: "tabular-nums",
-            }}
-          >
-            {currentQuarter()} · {fmtDate()} ·{" "}
-            <span style={{ color: "#A1A1AA" }}>
-              {pipelineCount.toLocaleString()} in pipeline · last run {lastRunAgo(finishedAt)}
-            </span>
-          </div>
+      <div style={{ padding: "24px 24px 0", flexShrink: 0 }}>
+        <h1
+          style={{
+            margin: 0,
+            fontSize: 16,
+            fontWeight: 500,
+            letterSpacing: "-0.02em",
+            color: "#09090B",
+          }}
+        >
+          Active Leads
+        </h1>
+        <div
+          style={{
+            fontSize: 11,
+            color: "#71717A",
+            marginTop: 5,
+            fontVariantNumeric: "tabular-nums",
+          }}
+        >
+          {currentQuarter()} · {fmtDate()} ·{" "}
+          <span style={{ color: "#A1A1AA" }}>
+            {total.toLocaleString()} leads · last run {lastRunAgo(finishedAt)}
+          </span>
         </div>
       </div>
 
@@ -191,9 +185,9 @@ export default async function LeadsPage() {
             borderColor="#2563EB"
           />
           <StatCard
-            label="Pipeline Value"
-            value={fmtMoney(pipelineTotal)}
-            sub="ICP leads only"
+            label="Total Leads"
+            value={total.toLocaleString()}
+            sub={includeExcluded ? "all sectors" : "ICP sectors only"}
             borderColor="#2563EB"
           />
         </div>
@@ -201,7 +195,18 @@ export default async function LeadsPage() {
 
       {/* Filter bar + table */}
       <div style={{ flex: 1, minHeight: 0, marginTop: 18 }}>
-        <LeadsContainer leads={leads} total={total} fetchError={fetchError} />
+        <LeadsContainer
+          leads={leads}
+          total={total}
+          limit={perPage}
+          offset={offset}
+          fetchError={fetchError}
+          activeTier={activeTier}
+          activeSignal={activeSignal}
+          activeStatus={activeStatus}
+          includeExcluded={includeExcluded}
+          sortBy={sortBy}
+        />
       </div>
     </div>
   );

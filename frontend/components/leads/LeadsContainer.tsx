@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState } from "react";
 import Link from "next/link";
+import { useRouter } from "next/navigation";
 import type { LeadListItem } from "@/lib/api";
 import { EmptyState } from "@/components/ui/EmptyState";
 import { ErrorState } from "@/components/ui/ErrorState";
@@ -59,27 +60,9 @@ function fmtMoney(s: string | null): string {
   return `$${n.toFixed(0)}`;
 }
 
-function fmtPipelineValue(leads: LeadListItem[]): string {
-  const total = leads.reduce(
-    (s, l) => s + (l.max_award_amount ? parseFloat(l.max_award_amount) : 0),
-    0
-  );
-  if (total >= 1_000_000_000) return `$${(total / 1_000_000_000).toFixed(2)}B`;
-  if (total >= 1_000_000) return `$${(total / 1_000_000).toFixed(2)}M`;
-  return `$${(total / 1_000).toFixed(0)}K`;
-}
-
 // ── Chip component ─────────────────────────────────────────────────────────────
 
-function Chip({
-  label,
-  active,
-  onClick,
-}: {
-  label: string;
-  active: boolean;
-  onClick: () => void;
-}) {
+function Chip({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
   return (
     <button
       onClick={onClick}
@@ -141,61 +124,104 @@ function Toggle({ on, onChange }: { on: boolean; onChange: (v: boolean) => void 
 const GRID_COLS =
   "minmax(200px,1.7fr) 80px 88px 72px minmax(160px,1.2fr) 92px 130px 96px 100px";
 
+// ── Signal chip labels → API signal_type values ───────────────────────────────
+
+const SIGNAL_CHIPS: { label: string; value: string }[] = [
+  { label: "Prime", value: "CONTRACT_AWARD" },
+  { label: "Sub", value: "SUBCONTRACT_AWARD" },
+  { label: "SBA PIF", value: "SBA_LOAN_PIF" },
+  { label: "SBA Active", value: "SBA_LOAN_ACTIVE" },
+];
+
+const STATUS_CHIPS = ["approved", "contacted", "rejected", "research"];
+
 // ── Main component ─────────────────────────────────────────────────────────────
 
 interface Props {
   leads: LeadListItem[];
   total: number;
+  limit: number;
+  offset: number;
   fetchError?: string;
+  activeTier: string;
+  activeSignal: string;
+  activeStatus: string;
+  includeExcluded: boolean;
+  sortBy: string;
 }
 
-export default function LeadsContainer({ leads, total, fetchError }: Props) {
-  const [tierFilters, setTierFilters] = useState<string[]>([]);
-  const [sourceFilters, setSourceFilters] = useState<string[]>([]);
-  const [statusFilters, setStatusFilters] = useState<string[]>([]);
-  const [targetOnly, setTargetOnly] = useState(true);
+export default function LeadsContainer({
+  leads,
+  total,
+  limit,
+  offset,
+  fetchError,
+  activeTier,
+  activeSignal,
+  activeStatus,
+  includeExcluded,
+  sortBy,
+}: Props) {
+  const router = useRouter();
   const [density, setDensity] = useState<"comfortable" | "compact">("comfortable");
 
-  const excludedCount = useMemo(() => leads.filter((l) => l.sector_excluded).length, [leads]);
+  const currentPage = Math.max(1, Math.floor(offset / limit) + 1);
+  const totalPages = Math.max(1, Math.ceil(total / limit));
 
-  const uniqueStatuses = useMemo(
-    () => [...new Set(leads.map((l) => l.sales_status))].sort(),
-    [leads]
-  );
+  function buildUrl(overrides: {
+    tier?: string;
+    signal?: string;
+    status?: string;
+    include_excluded?: boolean;
+    sort_by?: string;
+    page?: number;
+    per_page?: number;
+  }): string {
+    const tier = "tier" in overrides ? (overrides.tier ?? "") : activeTier;
+    const signal = "signal" in overrides ? (overrides.signal ?? "") : activeSignal;
+    const status = "status" in overrides ? (overrides.status ?? "") : activeStatus;
+    const ie = "include_excluded" in overrides ? overrides.include_excluded : includeExcluded;
+    const sb = "sort_by" in overrides ? (overrides.sort_by ?? sortBy) : sortBy;
+    const pg = "page" in overrides ? (overrides.page ?? 1) : currentPage;
+    const pp = "per_page" in overrides ? (overrides.per_page ?? limit) : limit;
 
-  function toggleFilter(arr: string[], val: string, set: (v: string[]) => void) {
-    set(arr.includes(val) ? arr.filter((x) => x !== val) : [...arr, val]);
+    const params = new URLSearchParams();
+    if (tier) params.set("tier", tier);
+    if (signal) params.set("signal", signal);
+    if (status) params.set("status", status);
+    if (ie) params.set("include_excluded", "true");
+    if (sb !== "score_desc") params.set("sort_by", sb);
+    if (pg > 1) params.set("page", String(pg));
+    if (pp !== 50) params.set("per_page", String(pp));
+    const qs = params.toString();
+    return "/leads" + (qs ? "?" + qs : "");
   }
 
-  const filtered = useMemo(() => {
-    let result = leads;
-    const sbaFilterActive = sourceFilters.some(
-      (sf) => sf === "SBA PIF" || sf === "SBA Active"
-    );
-    if (targetOnly && !sbaFilterActive) result = result.filter((l) => !l.sector_excluded);
-    if (tierFilters.length > 0)
-      result = result.filter((l) => tierFilters.includes((l.tier ?? "").toLowerCase()));
-    if (sourceFilters.length > 0)
-      result = result.filter((l) => {
-        const isPrime = l.signal_type === "CONTRACT_AWARD";
-        const isSub = l.signal_type === "SUBCONTRACT_AWARD";
-        const isSBAPIF = l.signal_type === "SBA_LOAN_PIF";
-        const isSBAActive = l.signal_type === "SBA_LOAN_ACTIVE";
-        return sourceFilters.some(
-          (sf) =>
-            (sf === "Prime" && isPrime) ||
-            (sf === "Sub" && isSub) ||
-            (sf === "SBA PIF" && isSBAPIF) ||
-            (sf === "SBA Active" && isSBAActive)
-        );
-      });
-    if (statusFilters.length > 0)
-      result = result.filter((l) => statusFilters.includes(l.sales_status));
+  function navigate(overrides: Parameters<typeof buildUrl>[0]) {
+    router.push(buildUrl(overrides));
+  }
+
+  // Pagination page number list: 1 ... prev [cur] next ... last
+  function getPageNumbers(): (number | "...")[] {
+    if (totalPages <= 7) return Array.from({ length: totalPages }, (_, i) => i + 1);
+    const result: (number | "...")[] = [1];
+    if (currentPage > 3) result.push("...");
+    for (
+      let p = Math.max(2, currentPage - 1);
+      p <= Math.min(totalPages - 1, currentPage + 1);
+      p++
+    ) {
+      result.push(p);
+    }
+    if (currentPage < totalPages - 2) result.push("...");
+    result.push(totalPages);
     return result;
-  }, [leads, targetOnly, tierFilters, sourceFilters, statusFilters]);
+  }
 
   const compact = density === "compact";
   const rowH = compact ? 44 : 54;
+  const pageStart = total === 0 ? 0 : offset + 1;
+  const pageEnd = Math.min(offset + limit, total);
 
   if (fetchError) {
     return (
@@ -234,57 +260,59 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
             Filters
           </span>
 
+          {/* Tier chips */}
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: 10, color: "#A1A1AA", marginRight: 1 }}>Tier</span>
             {["Hot", "Warm", "Cold", "Archive"].map((t) => (
               <Chip
                 key={t}
                 label={t}
-                active={tierFilters.includes(t.toLowerCase())}
-                onClick={() => toggleFilter(tierFilters, t.toLowerCase(), setTierFilters)}
+                active={activeTier === t.toLowerCase()}
+                onClick={() =>
+                  navigate({ tier: activeTier === t.toLowerCase() ? "" : t.toLowerCase(), page: 1 })
+                }
               />
             ))}
           </div>
 
+          {/* Signal chips */}
           <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
             <span style={{ fontSize: 10, color: "#A1A1AA", marginRight: 1 }}>Source</span>
-            {["Prime", "Sub", "SBA PIF", "SBA Active"].map((s) => (
+            {SIGNAL_CHIPS.map((s) => (
               <Chip
-                key={s}
-                label={s}
-                active={sourceFilters.includes(s)}
-                onClick={() => toggleFilter(sourceFilters, s, setSourceFilters)}
+                key={s.value}
+                label={s.label}
+                active={activeSignal === s.value}
+                onClick={() =>
+                  navigate({ signal: activeSignal === s.value ? "" : s.value, page: 1 })
+                }
               />
             ))}
           </div>
 
-          {uniqueStatuses.length > 1 && (
-            <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ fontSize: 10, color: "#A1A1AA", marginRight: 1 }}>Status</span>
-              {uniqueStatuses.slice(0, 5).map((s) => (
-                <Chip
-                  key={s}
-                  label={s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
-                  active={statusFilters.includes(s)}
-                  onClick={() => toggleFilter(statusFilters, s, setStatusFilters)}
-                />
-              ))}
-            </div>
-          )}
+          {/* Status chips */}
+          <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ fontSize: 10, color: "#A1A1AA", marginRight: 1 }}>Status</span>
+            {STATUS_CHIPS.map((s) => (
+              <Chip
+                key={s}
+                label={s.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())}
+                active={activeStatus === s}
+                onClick={() =>
+                  navigate({ status: activeStatus === s ? "" : s, page: 1 })
+                }
+              />
+            ))}
+          </div>
         </div>
 
         {/* Right: target toggle */}
         <div
           style={{ display: "flex", alignItems: "center", gap: 9, cursor: "pointer", userSelect: "none" }}
-          onClick={() => setTargetOnly(!targetOnly)}
+          onClick={() => navigate({ include_excluded: !includeExcluded, page: 1 })}
         >
-          <span style={{ fontSize: 11, color: "#71717A" }}>
-            Target industries only{" "}
-            {excludedCount > 0 && (
-              <span style={{ color: "#A1A1AA" }}>({excludedCount})</span>
-            )}
-          </span>
-          <Toggle on={targetOnly} onChange={setTargetOnly} />
+          <span style={{ fontSize: 11, color: "#71717A" }}>Target industries only</span>
+          <Toggle on={!includeExcluded} onChange={() => navigate({ include_excluded: !includeExcluded, page: 1 })} />
         </div>
       </div>
 
@@ -299,24 +327,12 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
           flexShrink: 0,
         }}
       >
-        <div
-          style={{
-            fontSize: 11,
-            color: "#71717A",
-            fontVariantNumeric: "tabular-nums",
-          }}
-        >
-          {filtered.length.toLocaleString()} / {total.toLocaleString()} ·{" "}
-          <span
-            style={{
-              color: "#09090B",
-              fontWeight: 500,
-              fontFamily: "var(--font-data, Inter, sans-serif)",
-            }}
-          >
-            {fmtPipelineValue(filtered)}
+        <div style={{ fontSize: 11, color: "#71717A", fontVariantNumeric: "tabular-nums" }}>
+          Showing{" "}
+          <span style={{ color: "#09090B", fontWeight: 500 }}>
+            {pageStart.toLocaleString()}–{pageEnd.toLocaleString()}
           </span>{" "}
-          in view
+          of {total.toLocaleString()} leads
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
           <div
@@ -374,42 +390,34 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
                 borderBottom: "0.5px solid #E4E4E7",
               }}
             >
-              {[
-                "Company",
-                "Score",
-                "Tier",
-                "Source",
-                "Industry",
-                "Award $",
-                "Agency",
-                "Signal",
-                "Status",
-              ].map((h, i) => (
-                <div
-                  key={h}
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 500,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.08em",
-                    color: "#71717A",
-                    textAlign: h === "Award $" ? "right" : "left",
-                    paddingRight: h === "Award $" ? 16 : 0,
-                  }}
-                >
-                  {h}
-                </div>
-              ))}
+              {["Company", "Score", "Tier", "Source", "Industry", "Award $", "Agency", "Signal", "Status"].map(
+                (h) => (
+                  <div
+                    key={h}
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 500,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.08em",
+                      color: "#71717A",
+                      textAlign: h === "Award $" ? "right" : "left",
+                      paddingRight: h === "Award $" ? 16 : 0,
+                    }}
+                  >
+                    {h}
+                  </div>
+                )
+              )}
             </div>
 
             {/* Rows */}
-            {filtered.length === 0 ? (
+            {leads.length === 0 ? (
               <EmptyState
                 title="No leads match these filters"
                 description="Try adjusting your filters or toggling the target industries switch."
               />
             ) : (
-              filtered.map((lead, idx) => {
+              leads.map((lead, idx) => {
                 const tierKey = (lead.tier ?? "").toLowerCase();
                 const tierCfg = TIER_CFG[tierKey] ?? TIER_CFG.archive;
                 const isPrime = lead.signal_type === "CONTRACT_AWARD";
@@ -441,10 +449,116 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
         </div>
       </div>
 
-      {/* Count footer */}
+      {/* Pagination bar */}
+      {totalPages > 1 && (
+        <div
+          style={{
+            padding: "14px 24px",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            flexShrink: 0,
+            flexWrap: "wrap",
+            gap: 12,
+          }}
+        >
+          {/* Page navigation */}
+          <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+            <button
+              onClick={() => navigate({ page: currentPage - 1 })}
+              disabled={currentPage <= 1}
+              style={{
+                padding: "4px 10px",
+                fontSize: 11,
+                fontWeight: 500,
+                cursor: currentPage <= 1 ? "default" : "pointer",
+                border: "0.5px solid #E4E4E7",
+                borderRadius: 6,
+                background: "#FFFFFF",
+                color: currentPage <= 1 ? "#D4D4D8" : "#71717A",
+                outline: "none",
+              }}
+            >
+              ← Prev
+            </button>
+
+            {getPageNumbers().map((p, i) =>
+              p === "..." ? (
+                <span key={`ellipsis-${i}`} style={{ fontSize: 11, color: "#A1A1AA", padding: "0 4px" }}>
+                  …
+                </span>
+              ) : (
+                <button
+                  key={p}
+                  onClick={() => navigate({ page: p as number })}
+                  style={{
+                    width: 30,
+                    height: 26,
+                    fontSize: 11,
+                    fontWeight: 500,
+                    cursor: "pointer",
+                    border: `0.5px solid ${p === currentPage ? "#09090B" : "#E4E4E7"}`,
+                    borderRadius: 6,
+                    background: p === currentPage ? "#09090B" : "#FFFFFF",
+                    color: p === currentPage ? "#FAFAFA" : "#71717A",
+                    outline: "none",
+                    fontVariantNumeric: "tabular-nums",
+                  }}
+                >
+                  {p}
+                </button>
+              )
+            )}
+
+            <button
+              onClick={() => navigate({ page: currentPage + 1 })}
+              disabled={currentPage >= totalPages}
+              style={{
+                padding: "4px 10px",
+                fontSize: 11,
+                fontWeight: 500,
+                cursor: currentPage >= totalPages ? "default" : "pointer",
+                border: "0.5px solid #E4E4E7",
+                borderRadius: 6,
+                background: "#FFFFFF",
+                color: currentPage >= totalPages ? "#D4D4D8" : "#71717A",
+                outline: "none",
+              }}
+            >
+              Next →
+            </button>
+          </div>
+
+          {/* Per-page selector */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ fontSize: 11, color: "#A1A1AA" }}>Per page:</span>
+            {[25, 50, 100].map((pp) => (
+              <button
+                key={pp}
+                onClick={() => navigate({ per_page: pp, page: 1 })}
+                style={{
+                  padding: "3px 8px",
+                  fontSize: 11,
+                  fontWeight: 500,
+                  cursor: "pointer",
+                  border: `0.5px solid ${limit === pp ? "#09090B" : "#E4E4E7"}`,
+                  borderRadius: 6,
+                  background: limit === pp ? "#09090B" : "transparent",
+                  color: limit === pp ? "#FAFAFA" : "#71717A",
+                  outline: "none",
+                }}
+              >
+                {pp}
+              </button>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Footer */}
       <div
         style={{
-          padding: "12px 26px 20px",
+          padding: "0 26px 20px",
           flexShrink: 0,
           fontSize: 11,
           color: "#A1A1AA",
@@ -452,14 +566,13 @@ export default function LeadsContainer({ leads, total, fetchError }: Props) {
           textAlign: "right",
         }}
       >
-        Showing 1–{Math.min(filtered.length, 2000).toLocaleString()} of{" "}
-        {total.toLocaleString()} leads
+        Page {currentPage} of {totalPages.toLocaleString()}
       </div>
     </div>
   );
 }
 
-// ── Individual row (extracted to avoid inline closure issues) ──────────────────
+// ── Individual row ─────────────────────────────────────────────────────────────
 
 interface RowProps {
   lead: LeadListItem;
@@ -492,8 +605,7 @@ function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, isSBAPIF, isSBAAc
       <div
         style={{
           display: "grid",
-          gridTemplateColumns:
-            "minmax(200px,1.7fr) 80px 88px 72px minmax(160px,1.2fr) 92px 130px 96px 100px",
+          gridTemplateColumns: GRID_COLS,
           alignItems: "center",
           padding: "0 16px",
           minHeight: rowH,
@@ -504,15 +616,7 @@ function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, isSBAPIF, isSBAAc
         }}
       >
         {/* Company */}
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 10,
-            minWidth: 0,
-            paddingRight: 12,
-          }}
-        >
+        <div style={{ display: "flex", alignItems: "center", gap: 10, minWidth: 0, paddingRight: 12 }}>
           <span
             style={{
               width: 28,
@@ -562,15 +666,7 @@ function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, isSBAPIF, isSBAAc
                 </span>
               )}
             </span>
-            <span
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 7,
-                marginTop: 2,
-                minWidth: 0,
-              }}
-            >
+            <span style={{ display: "flex", alignItems: "center", gap: 7, marginTop: 2, minWidth: 0 }}>
               <span
                 style={{
                   fontFamily: "var(--font-mono, 'JetBrains Mono', monospace)",
@@ -612,15 +708,7 @@ function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, isSBAPIF, isSBAAc
             {lead.score ?? "—"}
           </span>
           {lead.score != null && (
-            <div
-              style={{
-                width: 64,
-                height: 3,
-                background: "#E4E4E7",
-                borderRadius: 2,
-                overflow: "hidden",
-              }}
-            >
+            <div style={{ width: 64, height: 3, background: "#E4E4E7", borderRadius: 2, overflow: "hidden" }}>
               <div
                 style={{
                   width: `${Math.min(100, ((lead.score ?? 0) / 73) * 100)}%`,
@@ -648,13 +736,7 @@ function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, isSBAPIF, isSBAAc
             }}
           >
             <span
-              style={{
-                width: 5,
-                height: 5,
-                borderRadius: "50%",
-                background: tierCfg.color,
-                flexShrink: 0,
-              }}
+              style={{ width: 5, height: 5, borderRadius: "50%", background: tierCfg.color, flexShrink: 0 }}
             />
             {tierCfg.label}
           </span>
@@ -771,13 +853,7 @@ function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, isSBAPIF, isSBAAc
         </div>
 
         {/* Signal date */}
-        <div
-          style={{
-            fontSize: 12,
-            color: "#A1A1AA",
-            fontVariantNumeric: "tabular-nums",
-          }}
-        >
+        <div style={{ fontSize: 12, color: "#A1A1AA", fontVariantNumeric: "tabular-nums" }}>
           {fmtDate(lead.latest_signal_date)}
         </div>
 

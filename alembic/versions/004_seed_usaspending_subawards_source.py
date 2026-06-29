@@ -73,6 +73,31 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     conn = op.get_bind()
+    # Must cascade: signals → evidence_items → raw_source_events → source_runs →
+    # company_identifiers → source_registry
+    conn.execute(
+        sa.text("DELETE FROM signals WHERE source_id = CAST(:id AS uuid)"),
+        {"id": str(_SOURCE_ID)},
+    )
+    conn.execute(
+        sa.text("DELETE FROM evidence_items WHERE source_id = CAST(:id AS uuid)"),
+        {"id": str(_SOURCE_ID)},
+    )
+    conn.execute(
+        sa.text("DELETE FROM raw_source_events WHERE source_id = CAST(:id AS uuid)"),
+        {"id": str(_SOURCE_ID)},
+    )
+    conn.execute(
+        sa.text("DELETE FROM source_runs WHERE source_id = CAST(:id AS uuid)"),
+        {"id": str(_SOURCE_ID)},
+    )
+    conn.execute(
+        sa.text(
+            "UPDATE company_identifiers SET source_id = NULL "
+            "WHERE source_id = CAST(:id AS uuid)"
+        ),
+        {"id": str(_SOURCE_ID)},
+    )
     conn.execute(
         sa.text("DELETE FROM source_registry WHERE id = CAST(:id AS uuid)"),
         {"id": str(_SOURCE_ID)},

@@ -1,6 +1,7 @@
 /**
  * Thin API client for the Porter Capital Lead Intelligence FastAPI backend.
- * All functions are server-side only (process.env.API_URL is not public).
+ * Fetch helpers (fetchLeads, fetchLead, fetchSummary) are server-side only.
+ * Client-side review submissions go through the Next.js proxy at /api/leads/[id]/review.
  */
 
 const API_URL = process.env.API_URL ?? "http://localhost:8000";

@@ -1,10 +1,9 @@
 """
 Pydantic v2 response schemas for the Porter Capital Lead Intelligence API.
-Read-only — no write schemas exist in Stage 2A.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel
 
@@ -110,6 +109,19 @@ class ScoreDetailSchema(BaseModel):
     gate_result: str
     component_breakdown: dict[str, Any]
     config_hash: str
+
+
+class ReviewRequest(BaseModel):
+    decision: Literal["approved", "rejected", "contacted", "qualified", "passed"]
+    note: str | None = None
+    reviewer: str = "John Cox Miller"
+
+
+class ReviewResponse(BaseModel):
+    lead_id: str
+    decision: str
+    reviewed_at: str
+    note: str | None = None
 
 
 class LeadDetailSchema(BaseModel):
