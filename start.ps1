@@ -17,6 +17,14 @@ Write-Host "Porter Capital Lead Intelligence Platform" -ForegroundColor White
 Write-Host "Starting all services..." -ForegroundColor Gray
 Write-Host ""
 
+# Belt-and-suspenders: source_registry.enabled=True already makes the
+# orchestrator run these connectors with no env var needed. These are set
+# so manual `python -m scripts.run_pipeline` runs from this session behave
+# the same way even before the DB flag lookup, without depending on prior
+# terminal state.
+$env:SBA_LOANS_ENABLED = "true"
+$env:SBA_LOANS_TEST_LIMIT = "0"
+
 # Step 0 - Database backup
 Write-Step "Step 0 - Backing up database"
 python scripts/backup_db.py
