@@ -62,6 +62,11 @@ _AWARD_SIGNAL_TYPES = frozenset({"CONTRACT_AWARD", "SUBCONTRACT_AWARD"})
 #   PIF max = 8, Active max = 4 (both capped by why_now ceiling of 30).
 _SBA_SIGNAL_TYPES = frozenset({"SBA_LOAN_PIF", "SBA_LOAN_ACTIVE"})
 
+# SBIR/STTR grant signal types.
+# Bonuses confirmed by John Cox Miller, Porter Capital, July 2026:
+#   Phase II/III (strong) → +6, Phase I (medium) → +3
+_SBIR_SIGNAL_TYPES = frozenset({"SBIR_GRANT"})
+
 # Phase 1 cap for A/R Financing Fit component.
 _AR_FIT_PHASE1_CAP = 10
 
@@ -272,6 +277,16 @@ def score_company(company_id: UUID, db: Session) -> dict:
             wn_points = min(30, wn_points + sba_bonus)
             wn_evidence.append(best_sba.evidence_id)
 
+    # SBIR/STTR why_now bonus: Phase II/III (strong) → +6, Phase I (medium) → +3.
+    # Confirmed by John Cox Miller, Porter Capital, July 2026.
+    sbir_signals = [s for s in signals if s.signal_type in _SBIR_SIGNAL_TYPES]
+    if sbir_signals:
+        best_sbir = max(sbir_signals, key=lambda s: float(s.freshness_score or 0))
+        sbir_bonus = 6 if getattr(best_sbir, "signal_strength", "medium") == "strong" else 3
+        if sbir_bonus > 0:
+            wn_points = min(30, wn_points + sbir_bonus)
+            wn_evidence.append(best_sbir.evidence_id)
+
     _check_integrity("why_now", wn_points, wn_evidence)
     cited_uuids.update(wn_evidence)
     components["why_now"] = {
@@ -288,8 +303,11 @@ def score_company(company_id: UUID, db: Session) -> dict:
         ar_points += 7
         ar_evidence.extend(all_evidence_ids)
 
-    # SBA loan signals are also evidence of A/R financing need.
-    lending_signals = contract_signals or [s for s in signals if s.signal_type in _SBA_SIGNAL_TYPES]
+    # SBA loan and SBIR grant signals are also evidence of A/R financing need.
+    lending_signals = contract_signals or [
+        s for s in signals
+        if s.signal_type in (_SBA_SIGNAL_TYPES | _SBIR_SIGNAL_TYPES)
+    ]
     if lending_signals:
         ar_points += 3
         ar_evidence.append(lending_signals[0].evidence_id)

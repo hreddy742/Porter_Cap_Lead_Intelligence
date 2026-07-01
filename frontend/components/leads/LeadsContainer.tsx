@@ -131,6 +131,7 @@ const SIGNAL_CHIPS: { label: string; value: string }[] = [
   { label: "Sub", value: "SUBCONTRACT_AWARD" },
   { label: "SBA PIF", value: "SBA_LOAN_PIF" },
   { label: "SBA Active", value: "SBA_LOAN_ACTIVE" },
+  { label: "SBIR Grant", value: "SBIR_GRANT" },
 ];
 
 const STATUS_CHIPS = ["approved", "contacted", "rejected", "research"];
@@ -424,6 +425,7 @@ export default function LeadsContainer({
                 const isSub = lead.signal_type === "SUBCONTRACT_AWARD";
                 const isSBAPIF = lead.signal_type === "SBA_LOAN_PIF";
                 const isSBAActive = lead.signal_type === "SBA_LOAN_ACTIVE";
+                const isSBIR = lead.signal_type === "SBIR_GRANT";
                 const pal = avatarPalette(lead.company_name);
                 const initials = getInitials(lead.company_name);
                 const rowBg = idx % 2 === 0 ? "#FFFFFF" : "#FAFAFA";
@@ -439,6 +441,7 @@ export default function LeadsContainer({
                     isSub={isSub}
                     isSBAPIF={isSBAPIF}
                     isSBAActive={isSBAActive}
+                    isSBIR={isSBIR}
                     pal={pal}
                     initials={initials}
                   />
@@ -583,11 +586,12 @@ interface RowProps {
   isSub: boolean;
   isSBAPIF: boolean;
   isSBAActive: boolean;
+  isSBIR: boolean;
   pal: { bg: string; text: string };
   initials: string;
 }
 
-function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, isSBAPIF, isSBAActive, pal, initials }: RowProps) {
+function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, isSBAPIF, isSBAActive, isSBIR, pal, initials }: RowProps) {
   const [hovered, setHovered] = useState(false);
 
   const naics = lead.company_naics ?? "—";
@@ -790,6 +794,22 @@ function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, isSBAPIF, isSBAAc
               }}
             >
               ⚠ Active SBA
+            </span>
+          ) : isSBIR ? (
+            <span
+              title="SBIR/STTR grant recipient — federal R&D, government invoicing relationship"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                padding: "3px 7px",
+                borderRadius: 4,
+                fontSize: 10,
+                fontWeight: 500,
+                background: "rgba(147,51,234,0.10)",
+                color: "#7C3AED",
+              }}
+            >
+              🔬 SBIR Grant
             </span>
           ) : (
             <span style={{ fontSize: 12, color: "#A1A1AA" }}>—</span>

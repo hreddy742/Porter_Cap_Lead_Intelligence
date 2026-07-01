@@ -25,6 +25,7 @@ from app.ops.sentry import capture_exception
 from app.pipeline.connectors.usaspending import USASpendingConnector
 from app.pipeline.connectors.usaspending_subawards import USASpendingSubawardsConnector
 from app.pipeline.connectors.sba_loans import SBALoansConnector
+from app.pipeline.connectors.sbir_grants import SBIRGrantsConnector
 from app.processing.evidence import extract_evidence
 from app.processing.resolution import resolve_company_for_evidence
 from app.processing.scoring import score_company
@@ -60,6 +61,15 @@ def _load_enabled_sources(db: Session) -> list[SourceRegistry]:
             sources.append(sba_source)
             logger.info("sba_source_force_enabled", reason="SBA_LOANS_ENABLED=true env var")
 
+    # SBIR connector is controlled by env var in addition to the DB flag.
+    if os.getenv("SBIR_GRANTS_ENABLED", "false").lower() == "true":
+        sbir_source = db.execute(
+            select(SourceRegistry).where(SourceRegistry.name == "sbir_grants")
+        ).scalar_one_or_none()
+        if sbir_source is not None and not any(s.name == "sbir_grants" for s in sources):
+            sources.append(sbir_source)
+            logger.info("sbir_source_force_enabled", reason="SBIR_GRANTS_ENABLED=true env var")
+
     return sources
 
 
@@ -87,6 +97,10 @@ def _is_sba_loans(source: SourceRegistry) -> bool:
     return source.name.lower() == "sba_loans"
 
 
+def _is_sbir_grants(source: SourceRegistry) -> bool:
+    return source.name.lower() == "sbir_grants"
+
+
 def _execute_source(
     source: SourceRegistry,
     source_run: SourceRun,
@@ -109,6 +123,9 @@ def _execute_source(
             connector.run()
         elif _is_sba_loans(source):
             connector = SBALoansConnector(db, source_run, source)
+            connector.run()
+        elif _is_sbir_grants(source):
+            connector = SBIRGrantsConnector(db, source_run, source)
             connector.run()
         else:
             log.warning("orchestrator_unknown_source_skipped", source_name=source.name)

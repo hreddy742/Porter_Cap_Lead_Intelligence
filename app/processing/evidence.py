@@ -42,11 +42,14 @@ _CLAIM_SUBCONTRACT_AWARD = "SUBCONTRACT_AWARD"
 _CONFIDENCE_API = Decimal("0.9")
 _CONFIDENCE_SUBAWARD = Decimal("0.85")  # slightly lower: no UEI, no NAICS in response
 _CONFIDENCE_SBA = Decimal("0.85")       # FOIA bulk data, no UEI in response
+_CONFIDENCE_SBIR = Decimal("0.90")      # federal grant database — UEI present when awarded
 _FRESHNESS_WINDOW_DAYS = 180
 # SBA loans span up to 4+ years of history (filter: 2022-01-01+).
 # Use a longer freshness window so older loans still exceed the 0.1 Gate 3 floor.
 _SBA_FRESHNESS_WINDOW_DAYS = 1825  # 5 years
+_SBIR_FRESHNESS_WINDOW_DAYS = 1825  # 5 years — same as SBA; SBIR filter is 2022+
 _SBA_SOURCE_URL = "https://data.sba.gov/en/dataset/0ff8e8e9-b967-4f4e-987c-6ac78c575087"
+_SBIR_SOURCE_URL = "https://www.sbir.gov/awards"
 
 
 def _parse_date(value: object) -> date | None:
@@ -279,11 +282,88 @@ def _extract_sba_evidence(
     return [evidence]
 
 
+def _extract_sbir_evidence(
+    raw_event: RawSourceEvent, payload: dict, log: structlog.BoundLogger, db: Session
+) -> list[EvidenceItem]:
+    """Handle SBIR/STTR grant payloads (sbir_signal_type key).
+
+    Uses award_year to derive a mid-year signal date (June 15).  The full
+    year precision is all the API provides; mid-year is a reasonable proxy.
+    """
+    company_name_raw = payload.get("firm")
+    if not company_name_raw or not str(company_name_raw).strip():
+        log.warning("evidence_quarantine_missing_company_name")
+        return []
+    company_name = str(company_name_raw).strip()
+
+    award_year_raw = payload.get("award_year")
+    if award_year_raw is None:
+        log.warning("evidence_quarantine_bad_action_date", value=award_year_raw)
+        return []
+    try:
+        award_year = int(str(award_year_raw).strip())
+    except (ValueError, TypeError):
+        log.warning("evidence_quarantine_bad_action_date", value=award_year_raw)
+        return []
+
+    # Use June 15 of the award year as the signal date (mid-year proxy)
+    action_date_str = f"{award_year}-06-15"
+    action_date = _parse_date(action_date_str)
+    if action_date is None:
+        log.warning("evidence_quarantine_bad_action_date", value=action_date_str)
+        return []
+
+    amount_raw = payload.get("award_amount")
+    extracted_fields: dict = {
+        "company_name": company_name,
+        "uei": payload.get("uei"),
+        "duns": payload.get("duns"),
+        "award_amount": str(amount_raw) if amount_raw is not None else None,
+        "action_date": action_date.isoformat(),
+        "award_year": award_year,
+        "agency": payload.get("agency"),
+        "branch": payload.get("branch"),
+        "phase": payload.get("phase"),
+        "program": payload.get("program"),
+        "award_title": payload.get("award_title"),
+        "abstract": payload.get("abstract"),
+        "state_code": payload.get("state"),
+        "city": payload.get("city"),
+        "zip": payload.get("zip"),
+        "sbir_signal_strength": payload.get("sbir_signal_strength", "medium"),
+        "description": payload.get("description"),
+    }
+
+    freshness = _compute_freshness(action_date, window_days=_SBIR_FRESHNESS_WINDOW_DAYS)
+    source_url = raw_event.source_url or _SBIR_SOURCE_URL
+
+    evidence = _build_evidence_item(
+        raw_event=raw_event,
+        source_url=source_url,
+        extracted_fields=extracted_fields,
+        claim_supported="SBIR_GRANT",
+        confidence_score=_CONFIDENCE_SBIR,
+        freshness=freshness,
+    )
+    db.add(evidence)
+    db.flush()
+    log.info(
+        "evidence_extracted",
+        claim="SBIR_GRANT",
+        company=company_name,
+        award_year=award_year,
+        phase=payload.get("phase"),
+        freshness=freshness,
+    )
+    return [evidence]
+
+
 def extract_evidence(raw_event_id: UUID, db: Session) -> list[EvidenceItem]:
     """
     Extract structured evidence from one raw_source_events row.
 
     Dispatches to the correct handler based on payload shape:
+      - "sbir_signal_type" key → SBIR/STTR grant → SBIR_GRANT
       - "BorrName" key → SBA 7(a) loan → SBA_LOAN_PIF or SBA_LOAN_ACTIVE
       - lowercase "recipient_name" key → subaward → SUBCONTRACT_AWARD
       - title-case "Recipient Name" key → prime award → CONTRACT_AWARD
@@ -300,6 +380,8 @@ def extract_evidence(raw_event_id: UUID, db: Session) -> list[EvidenceItem]:
     payload: dict = raw_event.payload or {}
     log = logger.bind(raw_event_id=str(raw_event_id))
 
+    if "sbir_signal_type" in payload:
+        return _extract_sbir_evidence(raw_event, payload, log, db)
     if "BorrName" in payload:
         return _extract_sba_evidence(raw_event, payload, log, db)
     if "recipient_name" in payload and "Recipient Name" not in payload:

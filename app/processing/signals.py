@@ -32,11 +32,13 @@ _CLAIM_CONTRACT_AWARD = "CONTRACT_AWARD"
 _CLAIM_SUBCONTRACT_AWARD = "SUBCONTRACT_AWARD"
 _CLAIM_SBA_LOAN_PIF = "SBA_LOAN_PIF"
 _CLAIM_SBA_LOAN_ACTIVE = "SBA_LOAN_ACTIVE"
+_CLAIM_SBIR_GRANT = "SBIR_GRANT"
 _HANDLED_CLAIMS = frozenset({
     _CLAIM_CONTRACT_AWARD,
     _CLAIM_SUBCONTRACT_AWARD,
     _CLAIM_SBA_LOAN_PIF,
     _CLAIM_SBA_LOAN_ACTIVE,
+    _CLAIM_SBIR_GRANT,
 })
 
 # SBA signal strengths are fixed by loan status, not derived from loan amount.
@@ -132,8 +134,11 @@ def detect_signals_for_evidence(evidence_id: UUID, db: Session) -> list[Signal]:
     award_amount = _parse_amount(fields.get("award_amount"))
 
     # SBA signal strength is determined by loan status, not loan amount.
+    # SBIR signal strength is determined by phase (stored in extracted_fields).
     if evidence.claim_supported in _SBA_CLAIM_STRENGTHS:
         strength = _SBA_CLAIM_STRENGTHS[evidence.claim_supported]
+    elif evidence.claim_supported == _CLAIM_SBIR_GRANT:
+        strength = fields.get("sbir_signal_strength", "medium")
     else:
         strength = classify_signal_strength(award_amount)
 
