@@ -16,6 +16,8 @@ Coverage:
 
 from __future__ import annotations
 
+import csv
+import io
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -25,10 +27,12 @@ import pytest
 from pydantic import ValidationError
 
 from app.pipeline.connectors.sbir_grants import (
+    ConnectorError,
     SBIRGrantRecord,
     SBIRGrantsConnector,
     is_academic,
     signal_strength_for_phase,
+    _normalize_bulk_row,
     _parse_response,
     _TARGET_STATES,
     _MIN_AWARD_YEAR,
@@ -113,6 +117,91 @@ def _run_connector(
     with patch("app.pipeline.connectors.sbir_grants._fetch_page", side_effect=mock_fetch_page):
         connector = SBIRGrantsConnector(session, source_run, source)
         connector.run()
+
+    return connector, session, source_run
+
+
+def _valid_bulk_row(**overrides) -> dict:
+    """Minimal valid SBIR bulk CSV row (Title Case headers) that passes all filters."""
+    base = {
+        "Company": "Acme Technology Solutions LLC",
+        "Award Title": "Advanced Materials Development",
+        "Agency": "Department of Defense",
+        "Branch": "Army",
+        "Phase": "Phase II",
+        "Program": "SBIR",
+        "Award Year": "2024",
+        "Award Amount": "750000.0000",
+        "UEI": "ABCD1234567E",
+        "Duns": "123456789",
+        "Number Employees": "12",
+        "Company Website": "https://acmetech.com",
+        "Address1": "100 Innovation Drive",
+        "Address2": "",
+        "City": "Birmingham",
+        "State": "Alabama",
+        "Zip": "35201",
+        "Contact Name": "Jane Doe",
+        "Contact Title": "CEO",
+        "Contact Phone": "2055551234",
+        "Contact Email": "jane@acmetech.com",
+    }
+    base.update(overrides)
+    return base
+
+
+def _csv_content(rows: list[dict]) -> str:
+    if not rows:
+        return "Company,State,Award Year,Award Amount\n"
+    buf = io.StringIO()
+    writer = csv.DictWriter(buf, fieldnames=list(rows[0].keys()))
+    writer.writeheader()
+    writer.writerows(rows)
+    return buf.getvalue()
+
+
+def _run_dual_mode(
+    *,
+    bulk_rows: list[dict] | None = None,
+    api_responses: list[list[dict]] | None = None,
+    session: MagicMock | None = None,
+    source: MagicMock | None = None,
+    source_run: MagicMock | None = None,
+    env: dict[str, str] | None = None,
+) -> tuple[SBIRGrantsConnector, MagicMock, MagicMock]:
+    """Run the connector with mocked bulk cache and/or mocked API. Returns (connector, session, source_run)."""
+    if session is None:
+        session = _make_session()
+    if source is None:
+        source = _make_source()
+    if source_run is None:
+        source_run = _make_source_run()
+
+    mock_path = MagicMock()
+    mock_path.open.return_value.__enter__.return_value = io.StringIO(_csv_content(bulk_rows or []))
+
+    page_responses = list(api_responses or [])
+
+    def mock_fetch_page(state, start, page_size, timeout, log):
+        if page_responses:
+            return page_responses.pop(0)
+        return []
+
+    env_patch = {"SBIR_TEST_LIMIT": "0"}
+    if bulk_rows is not None:
+        env_patch["SBIR_BULK_ENABLED"] = "true"
+    if api_responses is not None:
+        env_patch["SBIR_API_ENABLED"] = "true"
+    else:
+        env_patch.setdefault("SBIR_API_ENABLED", "false")
+    if env:
+        env_patch.update(env)
+
+    with patch("app.pipeline.connectors.sbir_grants._ensure_bulk_cache", return_value=mock_path):
+        with patch("app.pipeline.connectors.sbir_grants._fetch_page", side_effect=mock_fetch_page):
+            with patch.dict("os.environ", env_patch):
+                connector = SBIRGrantsConnector(session, source_run, source)
+                connector.run()
 
     return connector, session, source_run
 
@@ -686,3 +775,325 @@ def test_sbir_why_now_capped_at_30():
     assert result["scored"] is True
     why_now = result["component_breakdown"]["why_now"]["points"]
     assert why_now <= 30, f"why_now exceeded 30: got {why_now}"
+
+
+# ─── State normalization (bulk uses full names, API uses 2-letter codes) ─────
+
+
+class TestStateNormalization:
+    def test_full_state_name_converted(self):
+        r = SBIRGrantRecord.model_validate(_valid_award(state="Alabama"))
+        assert r.state == "AL"
+
+    def test_full_state_name_case_insensitive(self):
+        r = SBIRGrantRecord.model_validate(_valid_award(state="georgia"))
+        assert r.state == "GA"
+
+    def test_abbreviation_still_passes_through(self):
+        r = SBIRGrantRecord.model_validate(_valid_award(state="ga"))
+        assert r.state == "GA"
+
+    def test_unrecognized_state_raises(self):
+        with pytest.raises(ValidationError):
+            SBIRGrantRecord.model_validate(_valid_award(state="Nowhereland"))
+
+
+# ─── number_employees parsing ─────────────────────────────────────────────────
+
+
+class TestNumberEmployees:
+    def test_parses_integer_string(self):
+        r = SBIRGrantRecord.model_validate(_valid_award(number_employees="12"))
+        assert r.number_employees == 12
+
+    def test_none_when_blank(self):
+        r = SBIRGrantRecord.model_validate(_valid_award(number_employees=""))
+        assert r.number_employees is None
+
+    def test_none_when_missing(self):
+        r = SBIRGrantRecord.model_validate(_valid_award())
+        assert r.number_employees is None
+
+
+# ─── award_amount normalization (cross-mode dedup depends on this) ──────────
+
+
+class TestAwardAmountNormalization:
+    def test_decimal_fraction_rounds_to_whole_dollar(self):
+        r = SBIRGrantRecord.model_validate(_valid_award(award_amount="664827.5000"))
+        assert r.award_amount == Decimal("664828")
+
+    def test_bulk_style_trailing_zeros_normalized(self):
+        r = SBIRGrantRecord.model_validate(_valid_award(award_amount="750000.0000"))
+        assert r.award_amount == Decimal("750000")
+
+
+# ─── Expanded institution filter (hospitals, associations, foundations) ─────
+
+
+class TestExpandedInstitutionFilter:
+    def test_hospital_filtered(self):
+        assert is_academic("Regional Medical Hospital Inc") is True
+
+    def test_association_filtered(self):
+        assert is_academic("Association of American Engineers") is True
+
+    def test_foundation_for_filtered(self):
+        assert is_academic("Foundation for Advanced Robotics") is True
+
+    def test_center_for_filtered(self):
+        assert is_academic("Center for Applied Physics LLC") is True
+
+    def test_normal_company_still_passes(self):
+        assert is_academic("Acme Technology Solutions LLC") is False
+
+
+# ─── _normalize_bulk_row() — bulk CSV headers -> API field names ────────────
+
+
+class TestNormalizeBulkRow:
+    def test_maps_all_fields(self):
+        row = _valid_bulk_row()
+        normalized = _normalize_bulk_row(row)
+        assert normalized["firm"] == "Acme Technology Solutions LLC"
+        assert normalized["state"] == "Alabama"
+        assert normalized["award_amount"] == "750000.0000"
+        assert normalized["award_year"] == "2024"
+        assert normalized["poc_name"] == "Jane Doe"
+        assert normalized["poc_title"] == "CEO"
+        assert normalized["poc_phone"] == "2055551234"
+        assert normalized["poc_email"] == "jane@acmetech.com"
+        assert normalized["company_url"] == "https://acmetech.com"
+        assert normalized["number_employees"] == "12"
+
+
+# ─── Bulk mode connector tests ────────────────────────────────────────────────
+
+
+class TestBulkMode:
+    def test_bulk_mode_downloads_cache_and_parses(self):
+        _, _, source_run = _run_dual_mode(bulk_rows=[_valid_bulk_row()])
+        assert source_run.status == "completed"
+        assert source_run.records_valid == 1
+        assert source_run.records_fetched == 1
+
+    def test_bulk_full_state_name_passes_target_filter(self):
+        row = _valid_bulk_row(State="Georgia")
+        _, _, source_run = _run_dual_mode(bulk_rows=[row])
+        assert source_run.records_valid == 1
+
+    def test_bulk_state_outside_target_skipped(self):
+        row = _valid_bulk_row(State="California")
+        _, _, source_run = _run_dual_mode(bulk_rows=[row])
+        assert source_run.records_valid == 0
+        assert source_run.records_skipped == 1
+
+    def test_bulk_academic_institution_skipped(self):
+        row = _valid_bulk_row(Company="University of Alabama Research LLC")
+        _, _, source_run = _run_dual_mode(bulk_rows=[row])
+        assert source_run.records_valid == 0
+        assert source_run.records_skipped == 1
+
+    def test_bulk_contact_fields_stored_in_payload(self):
+        _, session, source_run = _run_dual_mode(bulk_rows=[_valid_bulk_row()])
+        event = session.add.call_args_list[0][0][0]
+        payload = event.payload
+        assert payload["poc_name"] == "Jane Doe"
+        assert payload["poc_title"] == "CEO"
+        assert payload["poc_phone"] == "2055551234"
+        assert payload["poc_email"] == "jane@acmetech.com"
+        assert payload["company_url"] == "https://acmetech.com"
+        assert payload["number_employees"] == 12
+        assert payload["sbir_source_mode"] == "bulk"
+
+    def test_bulk_amount_normalized_in_payload(self):
+        row = _valid_bulk_row(**{"Award Amount": "664827.0000"})
+        _, session, source_run = _run_dual_mode(bulk_rows=[row])
+        event = session.add.call_args_list[0][0][0]
+        assert event.payload["award_amount"] == "664827"
+
+    def test_bulk_mode_off_by_default(self):
+        """SBIR_BULK_ENABLED defaults to false; only enabling API must not touch the bulk cache."""
+        session = _make_session()
+        source = _make_source()
+        source_run = _make_source_run()
+        award = _valid_award()
+        with patch("app.pipeline.connectors.sbir_grants._ensure_bulk_cache") as mock_ensure_cache:
+            with patch("app.pipeline.connectors.sbir_grants._fetch_page", side_effect=[[award], []]):
+                connector = SBIRGrantsConnector(session, source_run, source)
+                connector.run()
+        mock_ensure_cache.assert_not_called()
+        assert source_run.records_valid == 1
+
+
+# ─── API graceful 429 handling ────────────────────────────────────────────────
+
+
+class TestAPIGracefulSkip:
+    def test_api_exhausted_retries_skipped_gracefully(self):
+        """A ConnectorError from _fetch_page (429 exhausted) must not fail the whole run."""
+        session = _make_session()
+        source = _make_source()
+        source_run = _make_source_run()
+        with patch(
+            "app.pipeline.connectors.sbir_grants._fetch_page",
+            side_effect=ConnectorError("SBIR API unavailable"),
+        ):
+            connector = SBIRGrantsConnector(session, source_run, source)
+            connector.run()
+        assert source_run.status == "completed"
+        assert source_run.error_text is not None
+        assert "API mode skipped" in source_run.error_text
+
+    def test_bulk_records_survive_api_failure(self):
+        """If bulk mode already stored records, a subsequent API 429 must not lose them."""
+        bulk_row = _valid_bulk_row()
+        mock_path = MagicMock()
+        mock_path.open.return_value.__enter__.return_value = io.StringIO(_csv_content([bulk_row]))
+        session = _make_session()
+        source = _make_source()
+        source_run = _make_source_run()
+
+        with patch("app.pipeline.connectors.sbir_grants._ensure_bulk_cache", return_value=mock_path):
+            with patch(
+                "app.pipeline.connectors.sbir_grants._fetch_page",
+                side_effect=ConnectorError("SBIR API unavailable"),
+            ):
+                with patch.dict(
+                    "os.environ",
+                    {"SBIR_BULK_ENABLED": "true", "SBIR_API_ENABLED": "true", "SBIR_TEST_LIMIT": "0"},
+                ):
+                    connector = SBIRGrantsConnector(session, source_run, source)
+                    connector.run()
+
+        assert source_run.status == "completed"
+        assert source_run.records_valid == 1  # bulk row stored despite API failure
+
+
+# ─── Dual mode: both API and bulk run in one pass ────────────────────────────
+
+
+class TestDualModeRun:
+    def test_both_modes_run_when_both_enabled(self):
+        bulk_row = _valid_bulk_row(Company="Bulk Co LLC")
+        api_award = _valid_award(firm="API Co LLC")
+        connector, session, source_run = _run_dual_mode(
+            bulk_rows=[bulk_row],
+            api_responses=[[api_award], []],
+        )
+        assert source_run.status == "completed"
+        assert source_run.records_valid == 2
+        modes = {c[0][0].payload["sbir_source_mode"] for c in session.add.call_args_list}
+        assert modes == {"bulk", "api"}
+
+
+# ─── Cross-mode dedup ─────────────────────────────────────────────────────────
+
+
+class TestCrossModeDedup:
+    def test_same_award_produces_same_content_hash(self):
+        """A bulk row and an API row for the same award must hash identically,
+        even though bulk/API rows differ in field completeness (e.g. abstract)."""
+        session_bulk = _make_session()
+        session_api = _make_session()
+        source = _make_source()
+
+        bulk_row = _valid_bulk_row(
+            Company="Acme Tech LLC",
+            State="Alabama",
+            **{"Award Year": "2024", "Award Amount": "750000.0000"},
+        )
+        api_row = _valid_award(firm="Acme Tech LLC", state="AL", award_year=2024, award_amount=750000)
+
+        connector_bulk = SBIRGrantsConnector(session_bulk, _make_source_run(), source)
+        connector_bulk._process_record(bulk_row, mode="bulk")
+
+        connector_api = SBIRGrantsConnector(session_api, _make_source_run(), source)
+        connector_api._process_record(api_row, mode="api")
+
+        bulk_event = session_bulk.add.call_args_list[0][0][0]
+        api_event = session_api.add.call_args_list[0][0][0]
+        assert bulk_event.content_hash == api_event.content_hash
+
+    def test_second_mode_skips_when_hash_already_exists(self):
+        """When the DB already has this award's identity hash (from the other mode),
+        the connector must skip rather than insert a duplicate."""
+        source = _make_source()
+        api_row = _valid_award(firm="Acme Tech LLC", state="AL", award_year=2024, award_amount=750000)
+        source_run = _make_source_run()
+        session = _make_session(record_exists=True)
+        connector = SBIRGrantsConnector(session, source_run, source)
+
+        stored = connector._process_record(api_row, mode="api")
+
+        assert stored is False
+        assert source_run.records_skipped == 1
+        assert source_run.records_valid == 0
+
+
+# ─── Evidence extraction: contact enrichment fields ──────────────────────────
+
+
+class TestSBIRContactEnrichmentEvidence:
+    def _make_raw_event(self, payload: dict) -> MagicMock:
+        evt = MagicMock()
+        evt.id = uuid.uuid4()
+        evt.source_id = uuid.uuid4()
+        evt.payload = payload
+        evt.source_url = "https://www.sbir.gov/awards"
+        return evt
+
+    def test_contact_fields_extracted(self):
+        from app.processing.evidence import extract_evidence
+
+        payload = {
+            "sbir_signal_type": "SBIR_GRANT",
+            "firm": "Acme Tech LLC",
+            "state": "AL",
+            "award_amount": "750000",
+            "award_year": 2024,
+            "poc_name": "Jane Doe",
+            "poc_title": "CEO",
+            "poc_phone": "2055551234",
+            "poc_email": "jane@acmetech.com",
+            "company_url": "https://acmetech.com",
+            "number_employees": 12,
+        }
+        raw_event = self._make_raw_event(payload)
+
+        db = MagicMock()
+        db.get.return_value = raw_event
+        db.flush = MagicMock()
+
+        items = extract_evidence(raw_event.id, db)
+        assert len(items) == 1
+        item = items[0]
+        assert item.extracted_fields["poc_name"] == "Jane Doe"
+        assert item.extracted_fields["poc_title"] == "CEO"
+        assert item.extracted_fields["poc_phone"] == "2055551234"
+        assert item.extracted_fields["poc_email"] == "jane@acmetech.com"
+        assert item.extracted_fields["company_url"] == "https://acmetech.com"
+        assert item.extracted_fields["employee_count"] == 12
+
+    def test_missing_contact_fields_default_none(self):
+        from app.processing.evidence import extract_evidence
+
+        payload = {
+            "sbir_signal_type": "SBIR_GRANT",
+            "firm": "Acme Tech LLC",
+            "state": "AL",
+            "award_amount": "750000",
+            "award_year": 2024,
+        }
+        raw_event = self._make_raw_event(payload)
+
+        db = MagicMock()
+        db.get.return_value = raw_event
+        db.flush = MagicMock()
+
+        items = extract_evidence(raw_event.id, db)
+        item = items[0]
+        assert item.extracted_fields["poc_name"] is None
+        assert item.extracted_fields["poc_phone"] is None
+        assert item.extracted_fields["poc_email"] is None
+        assert item.extracted_fields["employee_count"] is None

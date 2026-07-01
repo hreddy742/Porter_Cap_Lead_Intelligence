@@ -331,6 +331,12 @@ def _extract_sbir_evidence(
         "city": payload.get("city"),
         "zip": payload.get("zip"),
         "sbir_signal_strength": payload.get("sbir_signal_strength", "medium"),
+        "poc_name": payload.get("poc_name"),
+        "poc_title": payload.get("poc_title"),
+        "poc_phone": payload.get("poc_phone"),
+        "poc_email": payload.get("poc_email"),
+        "company_url": payload.get("company_url"),
+        "employee_count": payload.get("number_employees"),
         "description": payload.get("description"),
     }
 

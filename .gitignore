@@ -46,6 +46,9 @@ logs/
 # SBA loan cache — 150 MB bulk CSV, regenerated on first run
 data/sba_loans_cache.csv
 
+# SBIR/STTR bulk award cache — ~90 MB CSV, regenerated on first run
+data/sbir_awards_cache.csv
+
 # OFAC SDN list — ~5 MB, must be downloaded manually, must never be committed
 data/ofac_sdn.csv
 
