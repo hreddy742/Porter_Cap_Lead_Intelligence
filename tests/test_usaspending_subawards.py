@@ -112,6 +112,7 @@ def _run_connector(
         "USASPENDING_SUBAWARDS_BACKOFF_BASE_SECONDS": "",
         "USASPENDING_SUBAWARDS_BACKOFF_MAX_SECONDS": "",
         "USASPENDING_SUBAWARDS_START_PAGE": "1",
+        "USASPENDING_SUBAWARDS_LOOKBACK_YEARS": "",
     }
     if env:
         env_patch.update(env)
@@ -172,7 +173,7 @@ def test_empty_results_completes_cleanly():
     assert mock_client.post.call_count == 1
 
 
-# ─── Test 3: zero/negative amount quarantined ────────────────────────────────
+# ─── Test 3: below-minimum / negative amount quarantined ─────────────────────
 
 
 def test_zero_amount_quarantined():
@@ -198,13 +199,25 @@ def test_negative_amount_quarantined():
     assert source_run.records_valid == 0
 
 
-# ─── Test 4: amount above $1B cap quarantined ────────────────────────────────
+def test_amount_below_minimum_quarantined():
+    """award_amount below $10,000 is administrative noise and must be quarantined."""
+    bad = {**_subaward(1), "amount": 500.0}
+    pages = [_mock_response([bad], has_next=False)]
+
+    source_run, _session, _client = _run_connector(responses=pages)
+
+    assert source_run.quarantine_count == 1
+    assert source_run.records_valid == 0
+
+
+# ─── Test 4: amount above $50M cap quarantined ───────────────────────────────
 
 
 def test_corrupt_amount_above_cap_quarantined():
     """
-    Amounts above $1B are quarantined as data corruption.
+    Amounts above $50M are quarantined as data corruption.
     The real subawards dataset contains trillion-dollar rows (e.g. $39T radar antenna).
+    The old $1B cap + start-page-500 workaround is replaced by this $10K-$50M window.
     """
     corrupt = {**_subaward(1), "amount": 39_157_943_915_794.0}
     valid = _subaward(2)
@@ -215,6 +228,17 @@ def test_corrupt_amount_above_cap_quarantined():
     assert source_run.quarantine_count == 1, "corrupt record must be quarantined"
     assert source_run.records_valid == 1, "valid record must still be stored"
     assert source_run.records_fetched == 2
+
+
+def test_amount_above_50m_quarantined():
+    """An amount above the $50M cap (but plausible, not corrupt-looking) is still quarantined."""
+    over_cap = {**_subaward(1), "amount": 60_000_000.0}
+    pages = [_mock_response([over_cap], has_next=False)]
+
+    source_run, _session, _client = _run_connector(responses=pages)
+
+    assert source_run.quarantine_count == 1
+    assert source_run.records_valid == 0
 
 
 # ─── Test 5: corrupt date (year 6010) quarantined ────────────────────────────
@@ -597,8 +621,12 @@ def test_start_page_env_var_controls_first_request_page():
     assert sent_body.get("page") == 500
 
 
-def test_start_page_default_is_500():
-    """Default start_page is 500 (skips corrupted trillion-dollar amount rows)."""
+def test_start_page_default_is_1():
+    """
+    Default start_page is 1 — the old default of 500 worked around the $1B
+    corruption cap; the $10K-$50M amount filter now achieves the same result
+    without hiding legitimate small subcontracts on pages 1-499.
+    """
     with patch.dict(
         "os.environ",
         {
@@ -615,7 +643,7 @@ def test_start_page_default_is_500():
             _make_session(), _make_source_run(), _make_source()
         )
 
-    assert connector.start_page == 500
+    assert connector.start_page == 1
 
 
 # ─── Test 26: timeout env var passed to httpx.Client ─────────────────────────
@@ -655,10 +683,10 @@ def test_timeout_env_var_passed_to_client():
 
 
 def test_boundary_amounts_pass_validation():
-    """Amounts at $30K and $999M (just below the $1B cap) must pass."""
-    record_30k = {**_subaward(1), "amount": 30_000.0}
-    record_999m = {**_subaward(2), "amount": 999_999_999.0}
-    pages = [_mock_response([record_30k, record_999m], has_next=False)]
+    """Amounts at $10K (floor) and $49.9M (just below the $50M cap) must pass."""
+    record_10k = {**_subaward(1), "amount": 10_000.0}
+    record_49_9m = {**_subaward(2), "amount": 49_900_000.0}
+    pages = [_mock_response([record_10k, record_49_9m], has_next=False)]
 
     source_run, _session, _client = _run_connector(responses=pages)
 
@@ -670,15 +698,17 @@ def test_boundary_amounts_pass_validation():
 
 
 def test_boundary_date_years_pass_validation():
-    """Dates at exactly 2000-01-01 and 2030-12-31 (inclusive bounds) must pass."""
+    """
+    Dates at exactly 2000-01-01 and 2030-12-31 (inclusive bounds) must pass
+    Pydantic validation (not be quarantined as corrupt). Checked against the
+    model directly since 2000-01-01 is old enough to be filtered out by the
+    separate activeness check when run through the full connector.
+    """
     record_2000 = {**_subaward(1), "action_date": "2000-01-01"}
     record_2030 = {**_subaward(2), "action_date": "2030-12-31"}
-    pages = [_mock_response([record_2000, record_2030], has_next=False)]
 
-    source_run, _session, _client = _run_connector(responses=pages)
-
-    assert source_run.records_valid == 2
-    assert source_run.quarantine_count == 0
+    assert USASpendingSubawardsRecord.model_validate(record_2000).award_date.year == 2000
+    assert USASpendingSubawardsRecord.model_validate(record_2030).award_date.year == 2030
 
 
 # ─── Test 27: USASpendingSubawardsRecord model validation ────────────────────
@@ -709,9 +739,17 @@ def test_record_model_rejects_empty_name():
 
 
 def test_record_model_rejects_amount_above_cap():
-    """An amount above $1B must raise ValueError."""
+    """An amount above $50M must raise ValueError."""
     from pydantic import ValidationError
-    raw = {**_subaward(1), "amount": 2_000_000_000.0}
+    raw = {**_subaward(1), "amount": 60_000_000.0}
+    with pytest.raises(ValidationError):
+        USASpendingSubawardsRecord.model_validate(raw)
+
+
+def test_record_model_rejects_amount_below_floor():
+    """An amount below $10,000 must raise ValueError."""
+    from pydantic import ValidationError
+    raw = {**_subaward(1), "amount": 500.0}
     with pytest.raises(ValidationError):
         USASpendingSubawardsRecord.model_validate(raw)
 
@@ -724,20 +762,27 @@ def test_record_model_rejects_year_6010_date():
         USASpendingSubawardsRecord.model_validate(raw)
 
 
-# ─── Test 28: noise keyword → quarantine ─────────────────────────────────────
+# ─── Test 28: noise keyword → soft-flag (still stored) ───────────────────────
 
 
-def test_noise_keyword_in_description_quarantines_record():
-    """A record whose description contains a noise keyword must be quarantined, not stored."""
+def test_noise_keyword_in_description_soft_flags_record():
+    """
+    A record whose description contains a noise keyword is still stored
+    (not quarantined) but soft-flagged sector_excluded=True — the company
+    might be a legitimate B2B firm; John decides, not this filter. Fixed
+    per John Cox Miller, Porter Capital, July 2026.
+    """
     noisy = {**_subaward(1), "description": "CCDBG CHILDCARE SERVICES SUBGRANT AWARD"}
     pages = [_mock_response([noisy], has_next=False)]
 
     source_run, session, _client = _run_connector(responses=pages)
 
-    assert source_run.quarantine_count == 1
-    assert source_run.records_valid == 0
+    assert source_run.quarantine_count == 0
+    assert source_run.records_valid == 1
     assert source_run.records_fetched == 1
-    session.add.assert_not_called()
+    added = session.add.call_args[0][0]
+    assert added.payload["sector_excluded"] is True
+    assert "childcare" in added.payload["sector_excluded_reason"].lower()
 
 
 # ─── Test 29: signal keyword → passes and annotated ──────────────────────────
@@ -839,14 +884,51 @@ def test_naics_inferred_stored_in_payload_for_manufacturing():
     assert added.payload.get("naics_code") == "33"
 
 
-def test_noise_keyword_still_quarantines_before_naics_inference():
-    """A description with a noise keyword is quarantined even if it also contains NAICS keywords.
-    Noise check runs first; naics_code must not appear in the payload."""
+# ─── Test 33: activeness-based date filter ────────────────────────────────────
+
+
+def test_active_subaward_future_pop_end_date_included():
+    """An old action_date but a future period_of_performance_current_end_date is included."""
+    old_but_active = {
+        **_subaward(1),
+        "action_date": "2019-01-01",
+        "period_of_performance_current_end_date": "2099-01-01",
+    }
+    pages = [_mock_response([old_but_active], has_next=False)]
+
+    source_run, _session, _client = _run_connector(responses=pages)
+
+    assert source_run.records_valid == 1
+    assert source_run.records_skipped == 0
+
+
+def test_expired_and_old_subaward_excluded():
+    """A subaward with no future pop end date and an action_date older than the
+    lookback window is skipped (records_skipped, not quarantined)."""
+    stale = {
+        **_subaward(1),
+        "action_date": "2015-01-01",
+        "period_of_performance_current_end_date": "2015-06-01",
+    }
+    pages = [_mock_response([stale], has_next=False)]
+
+    source_run, _session, _client = _run_connector(responses=pages)
+
+    assert source_run.records_valid == 0
+    assert source_run.records_skipped == 1
+
+
+def test_noise_keyword_soft_flag_skips_naics_inference():
+    """A description with a noise keyword is soft-flagged (not quarantined) even if it
+    also contains NAICS keywords. Noise check takes priority; naics_code inference is
+    skipped so a social-service record isn't mistakenly tagged as manufacturing."""
     noisy_mfg = {**_subaward(1), "description": "CHILDCARE FACILITY CONSTRUCTION AND MANUFACTURING"}
     pages = [_mock_response([noisy_mfg], has_next=False)]
 
     source_run, session, _client = _run_connector(responses=pages)
 
-    assert source_run.quarantine_count == 1
-    assert source_run.records_valid == 0
-    session.add.assert_not_called()
+    assert source_run.quarantine_count == 0
+    assert source_run.records_valid == 1
+    added = session.add.call_args[0][0]
+    assert added.payload["sector_excluded"] is True
+    assert "naics_code" not in added.payload

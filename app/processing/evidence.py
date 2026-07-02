@@ -205,6 +205,8 @@ def _extract_subaward_evidence(
         "prime_contractor": None,
         "naics_code": payload.get("naics_code"),
         "state_code": None,
+        "sector_excluded": payload.get("sector_excluded", False),
+        "sector_excluded_reason": payload.get("sector_excluded_reason"),
     }
 
     freshness = _compute_freshness(action_date)

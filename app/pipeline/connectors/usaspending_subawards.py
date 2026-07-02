@@ -24,9 +24,17 @@ Key differences from the prime-award connector (usaspending.py):
   UEI:           NOT in the response — company resolution is name-only;
                  a warning is logged on every attempt (see resolution module)
   NAICS:         NOT in the response — industry filtering is handled by scoring
-  Amount cap:    Quarantine records above $1 B — the raw data contains rows
-                 with amounts like $39 trillion that are clearly corrupt
+  Amount filter: award_amount must be $10,000-$50,000,000 (quality floor and
+                 a data-corruption ceiling — the raw data contains rows with
+                 amounts like $39 trillion that are clearly corrupt)
   Date guard:    Quarantine records with action_date year outside [2000, 2030]
+  Activeness:    Included if period_of_performance_current_end_date is in the
+                 future OR action_date is within USASPENDING_SUBAWARDS_LOOKBACK_YEARS
+
+Noise keywords (childcare, social-service grants, etc.) no longer quarantine
+the record — they soft-flag it (payload["sector_excluded"]=True) so it is
+still collected and stored but hidden from sales by default, per John Cox
+Miller, Porter Capital, July 2026. The keyword list is unchanged.
 
 Valid sort values (as of June 2026 API schema):
   id, subaward_number, description, action_date, amount, recipient_name
@@ -38,9 +46,11 @@ Env vars (all optional):
   USASPENDING_SUBAWARDS_MAX_RETRIES                       (default 3)
   USASPENDING_SUBAWARDS_BACKOFF_BASE_SECONDS              (default 2.0)
   USASPENDING_SUBAWARDS_BACKOFF_MAX_SECONDS               (default 60.0)
-  USASPENDING_SUBAWARDS_START_PAGE         first page to fetch (default 500)
-    Pages 1–499 of amount desc are above the $1B cap (corrupt rows). Setting
-    500 skips straight to the $1M–$30M subcontract window.
+  USASPENDING_SUBAWARDS_START_PAGE         first page to fetch (default 1)
+    The old default of 500 worked around the $1B corruption cap by skipping
+    past it. The proper $10K-$50M amount filter (below) achieves the same
+    result without hiding legitimate small subcontracts on pages 1-499.
+  USASPENDING_SUBAWARDS_LOOKBACK_YEARS     recency window (default 3)
 """
 
 from __future__ import annotations
@@ -50,7 +60,7 @@ import json
 import os
 import random
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 import httpx
@@ -65,9 +75,12 @@ logger = structlog.get_logger(__name__)
 
 _ENDPOINT = "https://api.usaspending.gov/api/v2/subawards/"
 
-# $1 B cap guards against data-corruption rows (e.g. $39-trillion radar antenna).
-# Legitimate federal subcontracts in Porter's ICP are well below this.
-_AMOUNT_MAX = Decimal("1000000000")
+# $10K floor filters administrative noise; $50M ceiling guards against the
+# data-corruption rows (e.g. $39-trillion radar antenna) that the old $1B cap
+# + start-page-500 workaround handled. Fixed per John Cox Miller, Porter
+# Capital, July 2026 — the $1B cap is no longer needed with this range.
+_AMOUNT_MIN = Decimal("10000")
+_AMOUNT_MAX = Decimal("50000000")
 
 # Year bounds guard against corrupt action_date values (year 6010, 2202, etc.)
 _DATE_YEAR_MIN = 2000
@@ -220,6 +233,9 @@ class USASpendingSubawardsRecord(BaseModel):
     award_date: date = Field(alias="action_date")
     award_amount: Decimal = Field(alias="amount")
     recipient_name: str = Field(alias="recipient_name")
+    period_of_performance_current_end_date: date | None = Field(
+        None, alias="period_of_performance_current_end_date"
+    )
 
     @field_validator("recipient_name", mode="before")
     @classmethod
@@ -238,8 +254,11 @@ class USASpendingSubawardsRecord(BaseModel):
             amount = Decimal(str(v))
         except (InvalidOperation, TypeError, ValueError):
             raise ValueError(f"award_amount must be numeric, got {v!r}")
-        if amount <= 0:
-            raise ValueError(f"award_amount must be positive, got {amount}")
+        if amount < _AMOUNT_MIN:
+            raise ValueError(
+                f"award_amount must be >= ${_AMOUNT_MIN:,} (administrative "
+                f"noise below that), got {amount}"
+            )
         if amount > _AMOUNT_MAX:
             raise ValueError(
                 f"award_amount {amount} exceeds ${_AMOUNT_MAX:,} cap "
@@ -267,6 +286,39 @@ class USASpendingSubawardsRecord(BaseModel):
                 "(data corruption guard — subawards endpoint has rows with year 6010)"
             )
         return parsed
+
+    @field_validator("period_of_performance_current_end_date", mode="before")
+    @classmethod
+    def parse_pop_end_date(cls, v: object) -> date | None:
+        if v is None or v == "":
+            return None
+        if isinstance(v, date):
+            return v
+        if isinstance(v, str):
+            try:
+                return date.fromisoformat(v)
+            except ValueError:
+                return None
+        return None
+
+
+def _is_active_subaward(
+    award_date: date,
+    pop_end_date: date | None,
+    lookback_years: int,
+) -> bool:
+    """True if the project is still running or the subaward is recent.
+
+    Mirrors the prime-award connector's activeness rule: include if EITHER
+    the period of performance end date is in the future (project still
+    active) OR the award was made within the lookback window. Fixed per
+    John Cox Miller, Porter Capital, July 2026.
+    """
+    today = date.today()
+    if pop_end_date is not None and pop_end_date >= today:
+        return True
+    cutoff = today - timedelta(days=365 * lookback_years)
+    return award_date >= cutoff
 
 
 # ─── Connector ────────────────────────────────────────────────────────────────
@@ -311,7 +363,8 @@ class USASpendingSubawardsConnector:
         self.max_retries = _env_int("USASPENDING_SUBAWARDS_MAX_RETRIES", 3)
         self.backoff_base = _env_float("USASPENDING_SUBAWARDS_BACKOFF_BASE_SECONDS", 2.0)
         self.backoff_max = _env_float("USASPENDING_SUBAWARDS_BACKOFF_MAX_SECONDS", 60.0)
-        self.start_page = _env_int("USASPENDING_SUBAWARDS_START_PAGE", 500)
+        self.start_page = _env_int("USASPENDING_SUBAWARDS_START_PAGE", 1)
+        self.lookback_years = _env_int("USASPENDING_SUBAWARDS_LOOKBACK_YEARS", 3)
 
         self._log = logger.bind(
             connector="usaspending_subawards",
@@ -439,18 +492,32 @@ class USASpendingSubawardsConnector:
             )
             return
 
+        if not _is_active_subaward(
+            record.award_date,
+            record.period_of_performance_current_end_date,
+            self.lookback_years,
+        ):
+            self.source_run.records_skipped += 1
+            self._log.info(
+                "subaward_not_active_skip",
+                record_id=record.record_id,
+                award_date=str(record.award_date),
+                pop_end_date=str(record.period_of_performance_current_end_date),
+            )
+            return
+
         desc = (record.description or "").lower()
 
+        # Noise keywords soft-flag rather than hard-block: the company might be
+        # a legitimate B2B firm delivering under a government program whose
+        # description happens to mention a social-service keyword. John
+        # decides, not this filter. Fixed per John Cox Miller, Porter Capital,
+        # July 2026.
+        noise_keyword: str | None = None
         for kw in _NOISE_KEYWORDS:
             if kw in desc:
-                self.source_run.quarantine_count += 1
-                self._log.info(
-                    "subaward_quarantine_noise_keyword",
-                    record_id=record.record_id,
-                    recipient=record.recipient_name,
-                    matched_keyword=kw,
-                )
-                return
+                noise_keyword = kw
+                break
 
         signal_keyword: str | None = None
         for kw in _SIGNAL_KEYWORDS:
@@ -477,15 +544,25 @@ class USASpendingSubawardsConnector:
         if signal_keyword is not None:
             payload["description_signal_keyword"] = signal_keyword
 
-        inferred_naics = _infer_naics_from_description(record.description)
-        if inferred_naics:
+        if noise_keyword is not None:
+            payload["sector_excluded"] = True
+            payload["sector_excluded_reason"] = f"Noise keyword match: {noise_keyword}"
             self._log.info(
-                "subaward_naics_inferred",
-                company=record.recipient_name,
-                naics_prefix=inferred_naics,
-                description=(record.description or "")[:80],
+                "subaward_sector_excluded_soft_flag",
+                record_id=record.record_id,
+                recipient=record.recipient_name,
+                matched_keyword=noise_keyword,
             )
-            payload["naics_code"] = inferred_naics
+        else:
+            inferred_naics = _infer_naics_from_description(record.description)
+            if inferred_naics:
+                self._log.info(
+                    "subaward_naics_inferred",
+                    company=record.recipient_name,
+                    naics_prefix=inferred_naics,
+                    description=(record.description or "")[:80],
+                )
+                payload["naics_code"] = inferred_naics
 
         event = RawSourceEvent(
             source_id=self.source.id,
