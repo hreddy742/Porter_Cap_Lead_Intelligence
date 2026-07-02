@@ -72,13 +72,20 @@ def _find_by_hard_id(id_type: str, id_value: str, db: Session) -> Company | None
 
 
 def _fuzzy_candidates(
-    normalized_name: str, exclude_id: UUID, db: Session
+    normalized_name: str, exclude_id: UUID, db: Session, state: str | None = None
 ) -> list[tuple[Company, float]]:
     """
-    Return all active companies with name similarity > threshold.
+    Return active companies with name similarity > threshold.
     Excludes `exclude_id` to prevent a company matching itself after flush.
+
+    Narrowed to companies in the same `state` (indexed) when known — without
+    this, comparing every new company against the entire companies table is
+    O(new_companies x total_companies) and becomes minutes-to-hours slow once
+    the table has thousands of rows (e.g. a full SBA bulk-loan run).
     """
     stmt = select(Company).where(Company.deleted_at.is_(None))
+    if state:
+        stmt = stmt.where(Company.state == state)
     all_companies = db.execute(stmt).scalars().all()
     results = []
     for c in all_companies:
@@ -187,7 +194,7 @@ def resolve_company_for_evidence(evidence_id: UUID, db: Session) -> Company | No
     db.flush()
 
     # Fuzzy check — flag for human review, NEVER auto-merge
-    for match, sim in _fuzzy_candidates(normalized_name, company.id, db):
+    for match, sim in _fuzzy_candidates(normalized_name, company.id, db, state=state):
         # Canonical pair ordering: smaller UUID string is always company_id_a
         if str(company.id) < str(match.id):
             id_a, id_b = company.id, match.id

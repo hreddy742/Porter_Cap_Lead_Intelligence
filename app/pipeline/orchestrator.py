@@ -147,8 +147,10 @@ def _execute_source(
         raw_events = _get_raw_events(source_run.id, db)
         log.info("orchestrator_events_loaded", count=len(raw_events))
 
-        for raw_event in raw_events:
+        for i, raw_event in enumerate(raw_events, start=1):
             summary["raw_events_processed"] += 1
+            if i % 1000 == 0:
+                log.info("orchestrator_events_progress", processed=i, total=len(raw_events))
 
             evidence_items = extract_evidence(raw_event.id, db)
             summary["evidence_items_created"] += len(evidence_items)
