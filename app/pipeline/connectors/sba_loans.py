@@ -5,20 +5,28 @@ Downloads the SBA 7(a) FOIA bulk CSV from data.sba.gov.
 Caches locally for 30 days to avoid repeated large downloads (~150 MB).
 Reads the CSV in chunks of 1000 rows — never loads 373K rows into memory.
 
-Filters applied:
-  - State: AL, GA, TN, FL, MS, TX, VA (Porter's geographic ICP)
-  - Loan amount: $50K – $5M
-  - Approval date: 2022-01-01 or later
-  - NAICS: all B2B sectors (excludes retail 44/45 and restaurants/hotels 72)
-  - LoanStatus: skip CHGOFF (defaulted), CANCLD (cancelled), EXEMPT
+Filters applied (per John Cox Miller, Porter Capital, July 2026 — collect
+everything, soft-flag rather than hard-block):
+  - State: ALL 50 states (Porter is expanding nationally — geographic
+    restriction removed)
+  - Loan amount: >= $50K (the $5M SBA program maximum makes an upper cap
+    redundant)
+  - Activeness: included if LoanStatus is EXEMPT/COMMIT (currently active/
+    pending) OR approval_date >= 2019-01-01 (7-year recency window)
+  - NAICS: all sectors collected; B2C sub-sectors (621-624 healthcare) and
+    non-B2B sectors (retail 44/45, restaurants/hotels 72) are soft-flagged
+    (sector_excluded=True), not hard-blocked. Blank NAICS is included.
+  - LoanStatus: hard-skip only CHGOFF (defaulted) and CANCLD (cancelled)
 
 Signal types produced:
-  SBA_LOAN_PIF    — paid-in-full loan (company grew, repaid, now scaling)
-  SBA_LOAN_ACTIVE — active loan (lien on receivables, needs qualification call)
+  SBA_LOAN_PIF     — paid-in-full loan (company grew, repaid, now scaling)
+  SBA_LOAN_ACTIVE  — active loan, incl. EXEMPT (lien on receivables, needs
+                     qualification call)
+  SBA_LOAN_PENDING — COMMIT status (just approved, needs working capital now)
 
-Confirmed by John Cox Miller (Porter Capital SVP), June 25 2026:
+Confirmed by John Cox Miller (Porter Capital SVP), June 25 2026 and July 2026:
   - Include ALL B2B industries, not just government contractors
-  - Exclude only pure B2C: restaurants, hotels, retail stores
+  - Noise keywords and B2C NAICS sub-sectors soft-flag, they don't hard-block
   - PIF alumni are strong prospects; active loans are workable
 
 Cache logic:
@@ -66,18 +74,25 @@ _DEFAULT_CACHE_PATH = "data/sba_loans_cache.csv"
 _DEFAULT_CACHE_EXPIRY_DAYS = 30
 _CHUNK_SIZE = 1000
 
-# Porter's geographic ICP for SBA leads
-_TARGET_STATES = frozenset({"AL", "GA", "TN", "FL", "MS", "TX", "VA"})
-
-# Loan amount bounds (inclusive)
+# Minimum loan amount — filters administrative noise. No maximum: the SBA
+# 7(a) program's own $5M cap makes an upper filter redundant. Porter is
+# expanding nationally, so the state restriction is removed entirely.
+# Fixed per John Cox Miller, Porter Capital, July 2026.
 _MIN_LOAN_AMOUNT = Decimal("50000")
-_MAX_LOAN_AMOUNT = Decimal("5000000")
 
-# Earliest approval date to include
-_MIN_APPROVAL_DATE = date(2022, 1, 1)
+# Recency window for PIF/blank-status loans (7 years). EXEMPT and COMMIT are
+# always included regardless of age — they represent currently active/pending
+# loans. Fixed per John Cox Miller, Porter Capital, July 2026.
+_MIN_APPROVAL_DATE = date(2019, 1, 1)
 
-# LoanStatus values to skip
-_SKIP_LOAN_STATUSES = frozenset({"CHGOFF", "CANCLD", "EXEMPT"})
+# LoanStatus values that hard-skip — defaulted or cancelled loans only.
+# EXEMPT means an active loan (not exempt from reporting) and must NOT be
+# skipped — this was a critical bug. Fixed per John Cox Miller, Porter
+# Capital, July 2026.
+_SKIP_LOAN_STATUSES = frozenset({"CHGOFF", "CANCLD"})
+
+# Statuses that are always "currently active/pending" regardless of age.
+_ALWAYS_ACTIVE_STATUSES = frozenset({"EXEMPT", "COMMIT"})
 
 # B2B NAICS prefixes to include — excludes pure B2C (44/45 Retail, 72 Food/Hotels).
 # Confirmed by John Cox Miller, Porter Capital, June 25 2026.
@@ -188,7 +203,10 @@ class SBALoanRecord(BaseModel):
     def validate_borr_name(cls, v: object) -> str:
         if not isinstance(v, str) or not v.strip():
             raise ValueError("BorrName must be a non-empty string")
-        return v.strip()
+        stripped = v.strip()
+        if any(kw in stripped.lower() for kw in {"domestic awardees", "undisclosed"}):
+            raise ValueError(f"placeholder BorrName: {stripped}")
+        return stripped
 
     @field_validator("borr_state", mode="before")
     @classmethod
@@ -284,14 +302,38 @@ def _has_noise_keyword(company_name: str) -> bool:
 
 
 def _signal_type_for_status(loan_status: str | None) -> str:
-    """Map LoanStatus to signal type. PIF = paid-in-full (strongest signal).
+    """Map LoanStatus to signal type.
+
+    PIF          — paid-in-full (strongest signal, company grew and repaid)
+    COMMIT       — just approved, not yet disbursed (needs capital now)
+    EXEMPT/blank/other — active loan (lien on receivables)
 
     The new SBA CSV format uses 'P I F' (with spaces) instead of 'PIF'.
     Strip spaces before comparing so both formats are handled.
     """
-    if loan_status and loan_status.upper().replace(" ", "") == "PIF":
+    normalized = (loan_status or "").upper().replace(" ", "")
+    if normalized == "PIF":
         return "SBA_LOAN_PIF"
+    if normalized == "COMMIT":
+        return "SBA_LOAN_PENDING"
     return "SBA_LOAN_ACTIVE"
+
+
+def _is_active_loan(
+    loan_status: str | None,
+    approval_date: date,
+) -> bool:
+    """True if the loan is currently active/pending or recent enough to matter.
+
+    EXEMPT and COMMIT loans are always included regardless of age — they
+    represent a currently active or pending loan. Everything else (PIF,
+    blank) must be within the 7-year recency window. Fixed per John Cox
+    Miller, Porter Capital, July 2026.
+    """
+    normalized = (loan_status or "").upper().replace(" ", "")
+    if normalized in _ALWAYS_ACTIVE_STATUSES:
+        return True
+    return approval_date >= _MIN_APPROVAL_DATE
 
 
 # ─── Cache management ─────────────────────────────────────────────────────────
@@ -439,44 +481,46 @@ class SBALoansConnector:
             )
             return
 
-        # State filter
-        if record.borr_state not in _TARGET_STATES:
+        # Loan amount filter — minimum only; the SBA 7(a) program's own $5M
+        # cap makes an upper filter redundant.
+        if record.gross_approval < _MIN_LOAN_AMOUNT:
             self.source_run.records_skipped += 1
             return
 
-        # Loan amount filter
-        if record.gross_approval < _MIN_LOAN_AMOUNT or record.gross_approval > _MAX_LOAN_AMOUNT:
-            self.source_run.records_skipped += 1
-            return
-
-        # Approval date filter
-        if record.approval_date < _MIN_APPROVAL_DATE:
-            self.source_run.records_skipped += 1
-            return
-
-        # LoanStatus filter — skip defaulted, cancelled, exempt
+        # LoanStatus hard-skip — only defaulted or cancelled loans.
         if record.loan_status and record.loan_status.upper() in _SKIP_LOAN_STATUSES:
             self.source_run.records_skipped += 1
             return
 
-        # NAICS filter — include only B2B sectors
-        if not _is_included_naics(record.naics_code):
+        # Activeness filter — EXEMPT/COMMIT always included; everything else
+        # must be within the 7-year recency window.
+        if not _is_active_loan(record.loan_status, record.approval_date):
             self.source_run.records_skipped += 1
             return
 
-        # B2C sub-sector exclusion — 621/622/623/624 are patient-facing, not B2B
+        if record.naics_code is None:
+            self._log.info("sba_blank_naics_included", company=record.borr_name)
+
+        # NAICS and noise-keyword exclusions are soft-flags, not hard blocks —
+        # the company might still be a legitimate B2B lead. John decides, not
+        # this filter. Fixed per John Cox Miller, Porter Capital, July 2026.
+        sector_excluded = False
+        sector_excluded_reason: str | None = None
         if _is_excluded_naics(record.naics_code):
-            self.source_run.records_skipped += 1
-            return
-
-        # Noise keyword filter — catch B2C businesses the NAICS filter may miss
-        if _has_noise_keyword(record.borr_name):
-            self.source_run.records_skipped += 1
-            return
+            sector_excluded = True
+            sector_excluded_reason = f"Healthcare B2C (NAICS {record.naics_code})"
+        elif record.naics_code and not _is_included_naics(record.naics_code):
+            sector_excluded = True
+            sector_excluded_reason = f"Non-B2B NAICS sector (NAICS {record.naics_code})"
+        elif _has_noise_keyword(record.borr_name):
+            sector_excluded = True
+            sector_excluded_reason = "Noise keyword match in company name"
 
         signal_type = _signal_type_for_status(record.loan_status)
         if signal_type == "SBA_LOAN_PIF":
             status_note = "Paid in full — proven financing need, now scaling"
+        elif signal_type == "SBA_LOAN_PENDING":
+            status_note = "SBA loan just approved — company needs working capital now"
         else:
             status_note = "Active SBA loan — lien on receivables, needs qualification"
 
@@ -495,6 +539,8 @@ class SBALoansConnector:
             "ApprovalDate": record.approval_date.isoformat(),
             "LoanStatus": record.loan_status or "",
             "JobsSupported": record.jobs_supported,
+            "sector_excluded": sector_excluded,
+            "sector_excluded_reason": sector_excluded_reason,
             "sba_signal_type": signal_type,
             "sba_status_note": status_note,
             "description": (

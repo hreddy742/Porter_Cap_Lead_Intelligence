@@ -30,22 +30,29 @@ logger = structlog.get_logger(__name__)
 
 _CLAIM_CONTRACT_AWARD = "CONTRACT_AWARD"
 _CLAIM_SUBCONTRACT_AWARD = "SUBCONTRACT_AWARD"
+_CLAIM_FEDERAL_GRANT = "FEDERAL_GRANT"
+_CLAIM_IDV_AWARD = "IDV_AWARD"
 _CLAIM_SBA_LOAN_PIF = "SBA_LOAN_PIF"
 _CLAIM_SBA_LOAN_ACTIVE = "SBA_LOAN_ACTIVE"
+_CLAIM_SBA_LOAN_PENDING = "SBA_LOAN_PENDING"
 _CLAIM_SBIR_GRANT = "SBIR_GRANT"
 _HANDLED_CLAIMS = frozenset({
     _CLAIM_CONTRACT_AWARD,
     _CLAIM_SUBCONTRACT_AWARD,
+    _CLAIM_FEDERAL_GRANT,
+    _CLAIM_IDV_AWARD,
     _CLAIM_SBA_LOAN_PIF,
     _CLAIM_SBA_LOAN_ACTIVE,
+    _CLAIM_SBA_LOAN_PENDING,
     _CLAIM_SBIR_GRANT,
 })
 
 # SBA signal strengths are fixed by loan status, not derived from loan amount.
-# Confirmed by John Cox Miller, Porter Capital, June 25 2026.
+# Confirmed by John Cox Miller, Porter Capital, June 25 2026 and July 2026.
 _SBA_CLAIM_STRENGTHS: dict[str, str] = {
-    _CLAIM_SBA_LOAN_PIF: "strong",    # paid-off = proven financing need, now scaling
-    _CLAIM_SBA_LOAN_ACTIVE: "medium", # active lien on receivables, needs qualification
+    _CLAIM_SBA_LOAN_PIF: "strong",     # paid-off = proven financing need, now scaling
+    _CLAIM_SBA_LOAN_ACTIVE: "medium",  # active lien on receivables, needs qualification
+    _CLAIM_SBA_LOAN_PENDING: "strong", # just approved — needs working capital now
 }
 
 

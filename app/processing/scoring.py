@@ -65,7 +65,11 @@ _AWARD_SIGNAL_TYPES = frozenset(
 # SBA signal types — bonuses scale with freshness (loan recency).
 # Max values confirmed by John Cox Miller, Porter Capital, June 25 2026:
 #   PIF max = 8, Active max = 4 (both capped by why_now ceiling of 30).
+# SBA_LOAN_PENDING (COMMIT status — just approved) is a flat +10, added
+# per John Cox Miller, Porter Capital, July 2026.
 _SBA_SIGNAL_TYPES = frozenset({"SBA_LOAN_PIF", "SBA_LOAN_ACTIVE"})
+_SBA_LOAN_PENDING_TYPE = "SBA_LOAN_PENDING"
+_SBA_LOAN_PENDING_BONUS = 10
 
 # SBIR/STTR grant signal types.
 # Bonuses confirmed by John Cox Miller, Porter Capital, July 2026:
@@ -282,6 +286,14 @@ def score_company(company_id: UUID, db: Session) -> dict:
             wn_points = min(30, wn_points + sba_bonus)
             wn_evidence.append(best_sba.evidence_id)
 
+    # SBA_LOAN_PENDING why_now bonus: flat +10 — a just-approved (COMMIT)
+    # loan means the company needs working capital now. Added per John Cox
+    # Miller, Porter Capital, July 2026.
+    pending_signals = [s for s in signals if s.signal_type == _SBA_LOAN_PENDING_TYPE]
+    if pending_signals:
+        wn_points = min(30, wn_points + _SBA_LOAN_PENDING_BONUS)
+        wn_evidence.append(pending_signals[0].evidence_id)
+
     # SBIR/STTR why_now bonus: Phase II/III (strong) → +6, Phase I (medium) → +3.
     # Confirmed by John Cox Miller, Porter Capital, July 2026.
     sbir_signals = [s for s in signals if s.signal_type in _SBIR_SIGNAL_TYPES]
@@ -311,7 +323,7 @@ def score_company(company_id: UUID, db: Session) -> dict:
     # SBA loan and SBIR grant signals are also evidence of A/R financing need.
     lending_signals = contract_signals or [
         s for s in signals
-        if s.signal_type in (_SBA_SIGNAL_TYPES | _SBIR_SIGNAL_TYPES)
+        if s.signal_type in (_SBA_SIGNAL_TYPES | _SBIR_SIGNAL_TYPES | {_SBA_LOAN_PENDING_TYPE})
     ]
     if lending_signals:
         ar_points += 3

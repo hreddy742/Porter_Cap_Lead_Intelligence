@@ -30,12 +30,11 @@ from app.pipeline.connectors.sba_loans import (
     _is_excluded_naics,
     _has_noise_keyword,
     _signal_type_for_status,
+    _is_active_loan,
     _SBA_INCLUDED_NAICS_PREFIXES,
     _SBA_EXCLUDED_NAICS_PREFIXES,
     _SBA_NOISE_KEYWORDS,
-    _TARGET_STATES,
     _MIN_LOAN_AMOUNT,
-    _MAX_LOAN_AMOUNT,
     _MIN_APPROVAL_DATE,
     _SKIP_LOAN_STATUSES,
 )
@@ -138,35 +137,41 @@ def _run_connector(
     return source_run, session
 
 
-# ─── NAICS filtering ─────────────────────────────────────────────────────────
+# ─── NAICS filtering (soft-flag, not hard block) ──────────────────────────────
 
 
-def test_restaurant_naics_excluded():
-    """NAICS 722511 (Restaurants) must be excluded — pure B2C."""
-    source_run, _ = _run_connector([_valid_row(naicscode="722511", naicsdescription="Restaurants")])
-    assert source_run.records_skipped == 1
-    assert source_run.records_valid == 0
-
-
-def test_hotel_naics_excluded():
-    """NAICS 721110 (Hotels) must be excluded — pure B2C."""
-    source_run, _ = _run_connector([_valid_row(naicscode="721110", naicsdescription="Hotels")])
-    assert source_run.records_skipped == 1
-    assert source_run.records_valid == 0
-
-
-def test_retail_naics_excluded():
-    """NAICS 441110 (New Car Dealers) must be excluded — Retail Trade (44)."""
-    source_run, _ = _run_connector([_valid_row(naicscode="441110")])
-    assert source_run.records_skipped == 1
-    assert source_run.records_valid == 0
-
-
-def test_manufacturing_naics_included():
-    """NAICS 332312 (Manufacturing) must be included — B2B sector 33."""
-    source_run, _ = _run_connector([_valid_row(naicscode="332312")])
+def test_restaurant_naics_soft_flagged():
+    """NAICS 722511 (Restaurants) is still collected but soft-flagged sector_excluded."""
+    source_run, session = _run_connector([_valid_row(naicscode="722511", naicsdescription="Restaurants")])
     assert source_run.records_valid == 1
     assert source_run.records_skipped == 0
+    added = session.add.call_args[0][0]
+    assert added.payload["sector_excluded"] is True
+
+
+def test_hotel_naics_soft_flagged():
+    """NAICS 721110 (Hotels) is still collected but soft-flagged sector_excluded."""
+    source_run, session = _run_connector([_valid_row(naicscode="721110", naicsdescription="Hotels")])
+    assert source_run.records_valid == 1
+    added = session.add.call_args[0][0]
+    assert added.payload["sector_excluded"] is True
+
+
+def test_retail_naics_soft_flagged():
+    """NAICS 441110 (New Car Dealers) is still collected but soft-flagged (Retail Trade 44)."""
+    source_run, session = _run_connector([_valid_row(naicscode="441110")])
+    assert source_run.records_valid == 1
+    added = session.add.call_args[0][0]
+    assert added.payload["sector_excluded"] is True
+
+
+def test_manufacturing_naics_included_not_flagged():
+    """NAICS 332312 (Manufacturing) must be included — B2B sector 33, not soft-flagged."""
+    source_run, session = _run_connector([_valid_row(naicscode="332312")])
+    assert source_run.records_valid == 1
+    assert source_run.records_skipped == 0
+    added = session.add.call_args[0][0]
+    assert added.payload["sector_excluded"] is False
 
 
 def test_staffing_naics_included():
@@ -193,25 +198,33 @@ def test_construction_naics_included():
     assert source_run.records_valid == 1
 
 
-# ─── State filtering ─────────────────────────────────────────────────────────
+def test_blank_naics_included():
+    """A row with no NAICS code at all must still be included (SAM.gov fills it later)."""
+    source_run, session = _run_connector([_valid_row(naicscode="")])
+    assert source_run.records_valid == 1
+    added = session.add.call_args[0][0]
+    assert added.payload["NaicsCode"] is None
+    assert added.payload["sector_excluded"] is False
 
 
-def test_state_ny_excluded():
-    """State NY must be excluded — not in Porter's geographic ICP."""
+# ─── State filtering removed — all 50 states included ─────────────────────────
+
+
+def test_state_ny_included():
+    """State NY must now be included — Porter is expanding nationally."""
     source_run, _ = _run_connector([_valid_row(borrstate="NY")])
-    assert source_run.records_skipped == 1
-    assert source_run.records_valid == 0
+    assert source_run.records_valid == 1
 
 
 def test_state_al_included():
-    """State AL must be included — in Porter's geographic ICP."""
+    """State AL must be included."""
     source_run, _ = _run_connector([_valid_row(borrstate="AL")])
     assert source_run.records_valid == 1
 
 
-def test_all_target_states_included():
-    """All seven target states must pass the state filter."""
-    for state in ("AL", "GA", "TN", "FL", "MS", "TX", "VA"):
+def test_states_outside_old_icp_included():
+    """States outside the old 7-state ICP list must now be included."""
+    for state in ("CA", "NY", "WA", "OH", "IL"):
         source_run, _ = _run_connector([_valid_row(borrstate=state)])
         assert source_run.records_valid == 1, f"State {state} should be included"
 
@@ -226,15 +239,18 @@ def test_amount_below_minimum_excluded():
     assert source_run.records_valid == 0
 
 
-def test_amount_above_maximum_excluded():
-    """Loan amount $6,000,000 must be excluded — above $5M maximum."""
+def test_amount_above_5m_included():
+    """
+    Loan amount $6,000,000 must now be included — the $5M cap was removed
+    (redundant with the SBA program's own $5M maximum).
+    """
     source_run, _ = _run_connector([_valid_row(grossapproval="6000000")])
-    assert source_run.records_skipped == 1
-    assert source_run.records_valid == 0
+    assert source_run.records_valid == 1
+    assert source_run.records_skipped == 0
 
 
 def test_amount_500k_included():
-    """Loan amount $500,000 must be included — within $50K–$5M range."""
+    """Loan amount $500,000 must be included — above the $50K minimum."""
     source_run, _ = _run_connector([_valid_row(grossapproval="500000")])
     assert source_run.records_valid == 1
 
@@ -246,7 +262,7 @@ def test_amount_50k_boundary_included():
 
 
 def test_amount_5m_boundary_included():
-    """Loan amount exactly $5,000,000 must be included — at maximum boundary."""
+    """Loan amount exactly $5,000,000 must be included."""
     source_run, _ = _run_connector([_valid_row(grossapproval="5000000")])
     assert source_run.records_valid == 1
 
@@ -266,6 +282,28 @@ def test_cancld_status_excluded():
     source_run, _ = _run_connector([_valid_row(loanstatus="CANCLD")])
     assert source_run.records_skipped == 1
     assert source_run.records_valid == 0
+
+
+def test_exempt_status_produces_sba_loan_active_signal():
+    """
+    LoanStatus EXEMPT means an active loan (not exempt from reporting) and
+    must NOT be skipped — this was a critical bug fix per John Cox Miller,
+    Porter Capital, July 2026.
+    """
+    source_run, session = _run_connector([_valid_row(loanstatus="EXEMPT")])
+    assert source_run.records_valid == 1
+    assert source_run.records_skipped == 0
+    added = session.add.call_args[0][0]
+    assert added.payload["sba_signal_type"] == "SBA_LOAN_ACTIVE"
+
+
+def test_commit_status_produces_sba_loan_pending_signal():
+    """LoanStatus COMMIT (just approved) must produce SBA_LOAN_PENDING."""
+    source_run, session = _run_connector([_valid_row(loanstatus="COMMIT", approvaldate="2026-06-01")])
+    assert source_run.records_valid == 1
+    added = session.add.call_args[0][0]
+    assert added.payload["sba_signal_type"] == "SBA_LOAN_PENDING"
+    assert "needs working capital now" in added.payload["sba_status_note"].lower()
 
 
 def test_pif_status_produces_sba_loan_pif_signal():
@@ -292,26 +330,56 @@ def test_blank_loan_status_produces_sba_loan_active_signal():
     assert added.payload["sba_signal_type"] == "SBA_LOAN_ACTIVE"
 
 
-# ─── Approval date filtering ─────────────────────────────────────────────────
+# ─── Activeness-based date filtering ──────────────────────────────────────────
 
 
-def test_approval_date_2019_excluded():
-    """ApprovalDate in 2019 must be excluded — before 2022-01-01 cutoff."""
-    source_run, _ = _run_connector([_valid_row(approvaldate="2019-06-15")])
+def test_approval_date_2015_excluded():
+    """ApprovalDate in 2015 (blank status) must be excluded — outside the 7-year window."""
+    source_run, _ = _run_connector([_valid_row(approvaldate="2015-06-15", loanstatus="")])
     assert source_run.records_skipped == 1
     assert source_run.records_valid == 0
 
 
 def test_approval_date_2023_included():
-    """ApprovalDate in 2023 must be included — after 2022-01-01 cutoff."""
+    """ApprovalDate in 2023 must be included — within the 7-year window."""
     source_run, _ = _run_connector([_valid_row(approvaldate="2023-06-15")])
     assert source_run.records_valid == 1
 
 
-def test_approval_date_2022_01_01_boundary_included():
-    """ApprovalDate exactly 2022-01-01 must be included — at cutoff boundary."""
-    source_run, _ = _run_connector([_valid_row(approvaldate="2022-01-01")])
+def test_approval_date_2019_01_01_boundary_included():
+    """ApprovalDate exactly 2019-01-01 must be included — at the 7-year cutoff boundary."""
+    source_run, _ = _run_connector([_valid_row(approvaldate="2019-01-01", loanstatus="")])
     assert source_run.records_valid == 1
+
+
+def test_exempt_status_included_regardless_of_age():
+    """An EXEMPT loan from 2015 must still be included — active loans skip the recency check."""
+    source_run, _ = _run_connector([_valid_row(approvaldate="2015-01-01", loanstatus="EXEMPT")])
+    assert source_run.records_valid == 1
+    assert source_run.records_skipped == 0
+
+
+def test_commit_status_included_regardless_of_age():
+    """A COMMIT loan must be included regardless of approval date age."""
+    source_run, _ = _run_connector([_valid_row(approvaldate="2015-01-01", loanstatus="COMMIT")])
+    assert source_run.records_valid == 1
+    assert source_run.records_skipped == 0
+
+
+def test_is_active_loan_exempt_always_true():
+    assert _is_active_loan("EXEMPT", date(2010, 1, 1)) is True
+
+
+def test_is_active_loan_commit_always_true():
+    assert _is_active_loan("COMMIT", date(2010, 1, 1)) is True
+
+
+def test_is_active_loan_pif_old_false():
+    assert _is_active_loan("PIF", date(2015, 1, 1)) is False
+
+
+def test_is_active_loan_pif_recent_true():
+    assert _is_active_loan("PIF", date(2023, 1, 1)) is True
 
 
 # ─── Deduplication ───────────────────────────────────────────────────────────
@@ -707,6 +775,12 @@ def test_record_model_rejects_empty_borr_name():
         SBALoanRecord.model_validate(_valid_row(borrname=""))
 
 
+def test_record_model_rejects_placeholder_borr_name():
+    """A known placeholder BorrName must raise ValidationError (hard block)."""
+    with pytest.raises(ValidationError):
+        SBALoanRecord.model_validate(_valid_row(borrname="Undisclosed Recipient"))
+
+
 def test_record_model_rejects_zero_amount():
     """grossapproval=0 must raise ValidationError."""
     with pytest.raises(ValidationError):
@@ -794,6 +868,16 @@ def test_signal_type_active_none():
     assert _signal_type_for_status(None) == "SBA_LOAN_ACTIVE"
 
 
+def test_signal_type_exempt_is_active():
+    """EXEMPT must map to SBA_LOAN_ACTIVE, not be skipped."""
+    assert _signal_type_for_status("EXEMPT") == "SBA_LOAN_ACTIVE"
+
+
+def test_signal_type_commit_is_pending():
+    """COMMIT must map to SBA_LOAN_PENDING."""
+    assert _signal_type_for_status("COMMIT") == "SBA_LOAN_PENDING"
+
+
 # ─── Test limit env var ───────────────────────────────────────────────────────
 
 
@@ -815,42 +899,48 @@ def test_empty_csv_completes_cleanly():
     assert source_run.records_valid == 0
 
 
-# ─── B2C NAICS exclusion (621/622/623/624) ───────────────────────────────────
+# ─── B2C NAICS soft-flag (621/622/623/624) ───────────────────────────────────
 
 
-def test_physician_office_naics_excluded():
-    """NAICS 621111 (Physician Offices) must be excluded — B2C patient billing."""
-    source_run, _ = _run_connector([_valid_row(naicscode="621111")])
-    assert source_run.records_skipped == 1
-    assert source_run.records_valid == 0
+def test_physician_office_naics_soft_flagged():
+    """NAICS 621111 (Physician Offices) is collected but soft-flagged — B2C patient billing."""
+    source_run, session = _run_connector([_valid_row(naicscode="621111")])
+    assert source_run.records_valid == 1
+    added = session.add.call_args[0][0]
+    assert added.payload["sector_excluded"] is True
+    assert "healthcare" in added.payload["sector_excluded_reason"].lower()
 
 
-def test_dental_office_naics_excluded():
-    """NAICS 621210 (Dental Offices) must be excluded — B2C patient billing."""
-    source_run, _ = _run_connector([_valid_row(naicscode="621210")])
-    assert source_run.records_skipped == 1
-    assert source_run.records_valid == 0
+def test_dental_office_naics_soft_flagged():
+    """NAICS 621210 (Dental Offices) is collected but soft-flagged — B2C patient billing."""
+    source_run, session = _run_connector([_valid_row(naicscode="621210")])
+    assert source_run.records_valid == 1
+    added = session.add.call_args[0][0]
+    assert added.payload["sector_excluded"] is True
 
 
-def test_hospital_naics_excluded():
-    """NAICS 622110 (General Medical Hospitals) must be excluded — B2C."""
-    source_run, _ = _run_connector([_valid_row(naicscode="622110")])
-    assert source_run.records_skipped == 1
-    assert source_run.records_valid == 0
+def test_hospital_naics_soft_flagged():
+    """NAICS 622110 (General Medical Hospitals) is collected but soft-flagged."""
+    source_run, session = _run_connector([_valid_row(naicscode="622110")])
+    assert source_run.records_valid == 1
+    added = session.add.call_args[0][0]
+    assert added.payload["sector_excluded"] is True
 
 
-def test_nursing_facility_naics_excluded():
-    """NAICS 623110 (Nursing Care Facilities) must be excluded — B2C."""
-    source_run, _ = _run_connector([_valid_row(naicscode="623110")])
-    assert source_run.records_skipped == 1
-    assert source_run.records_valid == 0
+def test_nursing_facility_naics_soft_flagged():
+    """NAICS 623110 (Nursing Care Facilities) is collected but soft-flagged."""
+    source_run, session = _run_connector([_valid_row(naicscode="623110")])
+    assert source_run.records_valid == 1
+    added = session.add.call_args[0][0]
+    assert added.payload["sector_excluded"] is True
 
 
-def test_daycare_naics_excluded():
-    """NAICS 624410 (Child Day Care Services) must be excluded — B2C."""
-    source_run, _ = _run_connector([_valid_row(naicscode="624410")])
-    assert source_run.records_skipped == 1
-    assert source_run.records_valid == 0
+def test_daycare_naics_soft_flagged():
+    """NAICS 624410 (Child Day Care Services) is collected but soft-flagged."""
+    source_run, session = _run_connector([_valid_row(naicscode="624410")])
+    assert source_run.records_valid == 1
+    added = session.add.call_args[0][0]
+    assert added.payload["sector_excluded"] is True
 
 
 def test_is_excluded_naics_physician():
@@ -873,37 +963,39 @@ def test_is_excluded_naics_none_returns_false():
     assert _is_excluded_naics(None) is False
 
 
-# ─── Noise keyword filter ─────────────────────────────────────────────────────
+# ─── Noise keyword soft-flag ──────────────────────────────────────────────────
 
 
-def test_dental_name_excluded():
-    """Company name containing 'dental' must be excluded — B2C noise keyword."""
-    source_run, _ = _run_connector([_valid_row(borrname="Atlanta Dental Group LLC")])
-    assert source_run.records_skipped == 1
-    assert source_run.records_valid == 0
+def test_dental_name_soft_flagged():
+    """Company name containing 'dental' is collected but soft-flagged — B2C noise keyword."""
+    source_run, session = _run_connector([_valid_row(borrname="Atlanta Dental Group LLC")])
+    assert source_run.records_valid == 1
+    added = session.add.call_args[0][0]
+    assert added.payload["sector_excluded"] is True
 
 
-def test_daycare_name_excluded():
-    """Company name containing 'daycare' must be excluded — B2C noise keyword."""
-    source_run, _ = _run_connector([_valid_row(borrname="Sunshine Daycare LLC", naicscode="999999")])
-    # Note: 999999 fails NAICS inclusion filter first — use a valid NAICS to test keyword path
-    source_run2, _ = _run_connector([_valid_row(borrname="Sunshine Daycare LLC", naicscode="561320")])
-    assert source_run2.records_skipped == 1
-    assert source_run2.records_valid == 0
+def test_daycare_name_soft_flagged():
+    """Company name containing 'daycare' is collected but soft-flagged — B2C noise keyword."""
+    source_run, session = _run_connector([_valid_row(borrname="Sunshine Daycare LLC", naicscode="561320")])
+    assert source_run.records_valid == 1
+    added = session.add.call_args[0][0]
+    assert added.payload["sector_excluded"] is True
 
 
-def test_preschool_name_excluded():
-    """Company name containing 'preschool' must be excluded — B2C noise keyword."""
-    source_run, _ = _run_connector([_valid_row(borrname="Bright Minds Preschool Inc", naicscode="561320")])
-    assert source_run.records_skipped == 1
-    assert source_run.records_valid == 0
+def test_preschool_name_soft_flagged():
+    """Company name containing 'preschool' is collected but soft-flagged — B2C noise keyword."""
+    source_run, session = _run_connector([_valid_row(borrname="Bright Minds Preschool Inc", naicscode="561320")])
+    assert source_run.records_valid == 1
+    added = session.add.call_args[0][0]
+    assert added.payload["sector_excluded"] is True
 
 
-def test_chiropractic_name_excluded():
-    """Company name containing 'chiropractic' must be excluded — B2C noise keyword."""
-    source_run, _ = _run_connector([_valid_row(borrname="Back Pain Chiropractic Center", naicscode="561320")])
-    assert source_run.records_skipped == 1
-    assert source_run.records_valid == 0
+def test_chiropractic_name_soft_flagged():
+    """Company name containing 'chiropractic' is collected but soft-flagged — B2C noise keyword."""
+    source_run, session = _run_connector([_valid_row(borrname="Back Pain Chiropractic Center", naicscode="561320")])
+    assert source_run.records_valid == 1
+    added = session.add.call_args[0][0]
+    assert added.payload["sector_excluded"] is True
 
 
 def test_has_noise_keyword_dental():

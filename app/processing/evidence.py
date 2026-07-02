@@ -45,9 +45,10 @@ _CONFIDENCE_SUBAWARD = Decimal("0.85")  # slightly lower: no UEI, no NAICS in re
 _CONFIDENCE_SBA = Decimal("0.85")       # FOIA bulk data, no UEI in response
 _CONFIDENCE_SBIR = Decimal("0.90")      # federal grant database — UEI present when awarded
 _FRESHNESS_WINDOW_DAYS = 180
-# SBA loans span up to 4+ years of history (filter: 2022-01-01+).
-# Use a longer freshness window so older loans still exceed the 0.1 Gate 3 floor.
-_SBA_FRESHNESS_WINDOW_DAYS = 1825  # 5 years
+# SBA loans span up to 7 years of history (filter: 2019-01-01+, or any age for
+# EXEMPT/COMMIT active/pending loans). Use a window comfortably wider than 7
+# years so the oldest included loans still clear the 0.1 Gate 3 floor.
+_SBA_FRESHNESS_WINDOW_DAYS = 3650  # 10 years
 _SBIR_FRESHNESS_WINDOW_DAYS = 1825  # 5 years — same as SBA; SBIR filter is 2022+
 _SBA_SOURCE_URL = "https://data.sba.gov/en/dataset/0ff8e8e9-b967-4f4e-987c-6ac78c575087"
 _SBIR_SOURCE_URL = "https://www.sbir.gov/awards"
@@ -270,6 +271,8 @@ def _extract_sba_evidence(
         "jobs_supported": payload.get("JobsSupported"),
         "sba_pif": loan_status.upper() == "PIF",
         "description": payload.get("description"),
+        "sector_excluded": payload.get("sector_excluded", False),
+        "sector_excluded_reason": payload.get("sector_excluded_reason"),
     }
 
     # Use a longer freshness window for SBA loans since the data covers 4+ years
