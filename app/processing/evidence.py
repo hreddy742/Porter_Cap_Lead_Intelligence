@@ -49,7 +49,7 @@ _FRESHNESS_WINDOW_DAYS = 180
 # EXEMPT/COMMIT active/pending loans). Use a window comfortably wider than 7
 # years so the oldest included loans still clear the 0.1 Gate 3 floor.
 _SBA_FRESHNESS_WINDOW_DAYS = 3650  # 10 years
-_SBIR_FRESHNESS_WINDOW_DAYS = 1825  # 5 years — same as SBA; SBIR filter is 2022+
+_SBIR_FRESHNESS_WINDOW_DAYS = 3650  # 10 years — same as SBA; SBIR filter is 2019+
 _SBA_SOURCE_URL = "https://data.sba.gov/en/dataset/0ff8e8e9-b967-4f4e-987c-6ac78c575087"
 _SBIR_SOURCE_URL = "https://www.sbir.gov/awards"
 
@@ -355,6 +355,9 @@ def _extract_sbir_evidence(
         "company_url": payload.get("company_url"),
         "employee_count": payload.get("number_employees"),
         "description": payload.get("description"),
+        "contract_end_date": payload.get("contract_end_date"),
+        "sector_excluded": payload.get("sector_excluded", False),
+        "sector_excluded_reason": payload.get("sector_excluded_reason"),
     }
 
     freshness = _compute_freshness(action_date, window_days=_SBIR_FRESHNESS_WINDOW_DAYS)

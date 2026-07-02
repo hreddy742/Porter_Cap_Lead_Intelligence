@@ -24,14 +24,19 @@ Bulk: https://data.www.sbir.gov/mod_awarddatapublic_no_abstract/award_data_no_ab
       are not part of Porter's scoring or contact-enrichment fields, so the smaller
       no-abstract file is the default. Override with SBIR_BULK_URL if needed.)
 
-Filters applied (both modes):
-  - State: AL, GA, TN, FL, MS, TX, VA (Porter's geographic ICP)
-  - Award year: 2022 or later (recent grants only)
+Filters applied (both modes; per John Cox Miller, Porter Capital, July 2026 —
+collect everything, soft-flag rather than hard-block):
+  - State: ALL 50 states (Porter is expanding nationally — geographic
+    restriction removed)
+  - Activeness: included if contract_end_date is in the future (project still
+    active) OR award_year >= 2019 (7-year recency window)
   - Award amount: >= $50,000
-  - Exclude universities, colleges, research institutions, hospitals, associations
-
-University/institution filter is critical: SBIR awards go to universities and other
-non-factorable institutions too. Porter cannot factor those — filter them out.
+  - Universities/colleges/research institutions/hospitals/associations are
+    soft-flagged (sector_excluded=True), not hard-blocked. Hard block only
+    fires for an exact match against a small list of unmistakable university
+    names (e.g. "MIT") — Porter cannot factor those under any circumstance.
+  - NAICS: SBIR has no NAICS field at all; every company has naics_code=None.
+    This is expected — SAM.gov enrichment fills it in later.
 
 Signal types produced:
   SBIR_GRANT — all phases produce this signal type.
@@ -63,7 +68,8 @@ import hashlib
 import os
 import sys
 import time
-from datetime import datetime, timezone
+import re
+from datetime import date, datetime, timezone
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from pathlib import Path
 
@@ -122,6 +128,7 @@ _BULK_FIELD_MAP = {
     "Contact Title": "poc_title",
     "Contact Phone": "poc_phone",
     "Contact Email": "poc_email",
+    "Contract End Date": "contract_end_date",
 }
 
 # The bulk CSV spells out full state names ("Alabama"); the API uses 2-letter
@@ -143,11 +150,14 @@ _STATE_NAME_TO_ABBR = {
     "PUERTO RICO": "PR", "GUAM": "GU", "VIRGIN ISLANDS": "VI",
 }
 
-# Porter's geographic ICP — same as SBA and USASpending connectors
-_TARGET_STATES = frozenset({"AL", "GA", "TN", "FL", "MS", "TX", "VA"})
+# All US states + DC + territories the bulk/API state field can report.
+# Porter is expanding nationally — the old 7-state geographic ICP filter was
+# removed per John Cox Miller, Porter Capital, July 2026.
+_ALL_STATES = frozenset(_STATE_NAME_TO_ABBR.values())
 
-# Earliest award year to include (recent awards only)
-_MIN_AWARD_YEAR = 2022
+# Earliest award year to include for awards with no future contract_end_date
+# (7-year recency window). Fixed per John Cox Miller, Porter Capital, July 2026.
+_MIN_AWARD_YEAR = 2019
 
 # Minimum grant size (very small grants are likely pre-revenue)
 _MIN_AWARD_AMOUNT = Decimal("50000")
@@ -155,15 +165,19 @@ _MIN_AWARD_AMOUNT = Decimal("50000")
 # Company name tokens that indicate an academic, research, or non-factorable
 # institutional recipient. Porter cannot factor universities, labs, hospitals,
 # or member associations/foundations.
+#
+# "institute", "center for", and "foundation for" were removed — too broad,
+# they collided with legitimate B2B names (e.g. "Center for Applied
+# Engineering LLC"). Replaced with precise multi-word phrases, mirroring the
+# OFAC gate's approach of using longer, less ambiguous match strings.
+# Fixed per John Cox Miller, Porter Capital, July 2026.
 _ACADEMIC_KEYWORDS = frozenset({
     "university",
     "college",
-    "institute",
     "laboratory",
     "laboratories",
     "research foundation",
     "polytechnic",
-    "community college",
     "technical college",
     "school of",
     "dept of",
@@ -172,10 +186,27 @@ _ACADEMIC_KEYWORDS = frozenset({
     "medical center",
     "hospital",
     "health system",
-    "foundation for",
     "association of",
-    "center for",
     "academy of",
+    "national institute of",
+    "national center for",
+    "national foundation for",
+    "university of",
+    "state university",
+    "community college",
+})
+
+# Company names that are hard-blocked outright — unmistakable, non-factorable
+# academic institutions. Exact match only (not substring) so legitimate
+# companies whose name happens to contain one of these tokens are still
+# soft-flagged via _ACADEMIC_KEYWORDS instead of hard-blocked.
+_EXACT_ACADEMIC_NAMES = frozenset({
+    "MIT",
+    "CALTECH",
+    "STANFORD UNIVERSITY",
+    "HARVARD UNIVERSITY",
+    "MASSACHUSETTS INSTITUTE OF TECHNOLOGY",
+    "CALIFORNIA INSTITUTE OF TECHNOLOGY",
 })
 
 
@@ -244,6 +275,7 @@ class SBIRGrantRecord(BaseModel):
     poc_email: str | None = None
     company_url: str | None = None
     number_employees: int | None = None
+    contract_end_date: date | None = None
 
     @field_validator("firm", mode="before")
     @classmethod
@@ -302,6 +334,20 @@ class SBIRGrantRecord(BaseModel):
         except (ValueError, TypeError):
             raise ValueError(f"award_year must be an integer, got {v!r}")
 
+    @field_validator("contract_end_date", mode="before")
+    @classmethod
+    def parse_contract_end_date(cls, v: object) -> date | None:
+        if v is None or (isinstance(v, str) and not v.strip()):
+            return None
+        if isinstance(v, date):
+            return v
+        if isinstance(v, str):
+            try:
+                return date.fromisoformat(v.strip())
+            except ValueError:
+                return None
+        return None
+
     @field_validator("city", "zip", "address1", "address2", "agency", "branch",
                      "phase", "program", "award_title", "abstract", "uei", "duns",
                      "poc_name", "poc_title", "poc_phone", "poc_email", "company_url",
@@ -321,10 +367,61 @@ def is_academic(company_name: str) -> bool:
     """Return True if the name contains an academic/research institution keyword.
 
     Universities, colleges, and research foundations are valid SBIR recipients
-    but Porter Capital cannot factor academic institutions — exclude them.
+    but Porter Capital cannot factor academic institutions — this now soft-flags
+    (sector_excluded) rather than hard-blocking; see _is_exact_academic_name for
+    the small hard-block list. Word-boundary matching avoids false positives
+    like "college" inside "Collegiate Sports LLC".
     """
     name_lower = company_name.lower()
-    return any(kw in name_lower for kw in _ACADEMIC_KEYWORDS)
+    return any(
+        re.search(rf"\b{re.escape(kw)}\b", name_lower) for kw in _ACADEMIC_KEYWORDS
+    )
+
+
+def _is_exact_academic_name(company_name: str) -> bool:
+    """Return True only for an exact match against an unmistakable university name.
+
+    Hard-blocks (records_skipped, not stored) — reserved for the handful of
+    institutions Porter can never factor under any circumstance. Everything
+    else caught by is_academic() is soft-flagged instead.
+    """
+    return company_name.strip().upper() in _EXACT_ACADEMIC_NAMES
+
+
+def _is_active_sbir(award_year: int, contract_end_date: date | None) -> bool:
+    """True if the SBIR project is still active or the award is recent.
+
+    Include if EITHER contract_end_date is in the future (project still
+    running) OR award_year is within the recency window. Mirrors the
+    activeness rule used by the USASpending and SBA connectors. Fixed per
+    John Cox Miller, Porter Capital, July 2026.
+    """
+    if contract_end_date is not None and contract_end_date >= date.today():
+        return True
+    return award_year >= _MIN_AWARD_YEAR
+
+
+# Government email domains/markers seen in the SBIR "Contact" fields — these
+# are the sponsoring agency's program officer, not the awarded company.
+_GOV_CONTACT_EMAIL_MARKERS = (
+    ".mil", ".gov", ".af.mil", ".army.mil", ".navy.mil",
+    ".marines.mil", ".uscg.mil", "afwerx", "sbir@",
+)
+
+
+def _is_government_contact(email: str | None, phone: str | None) -> bool:
+    """Return True if a contact's email/phone belongs to a government program
+    officer rather than the awarded company (SBIR bulk data mixes the two).
+    """
+    if email:
+        email_lower = email.lower()
+        if any(marker in email_lower for marker in _GOV_CONTACT_EMAIL_MARKERS):
+            return True
+    if phone:
+        # Placeholder numbers (e.g. 999-999-9999)
+        if "9999999" in phone.replace("-", "").replace(" ", ""):
+            return True
+    return False
 
 
 def signal_strength_for_phase(phase: str | None) -> str:
@@ -575,8 +672,8 @@ class SBIRGrantsConnector:
     # ── API mode ──────────────────────────────────────────────────────────────
 
     def _run_api(self) -> None:
-        """Loop over all target states and paginate through current awards."""
-        for state in sorted(_TARGET_STATES):
+        """Loop over all US states and paginate through current awards."""
+        for state in sorted(_ALL_STATES):
             self._fetch_state(state)
             if self.test_limit > 0 and self.source_run.records_fetched >= self.test_limit:
                 self._log.info("sbir_test_limit_reached", limit=self.test_limit)
@@ -651,13 +748,10 @@ class SBIRGrantsConnector:
             )
             return False
 
-        # State filter
-        if record.state not in _TARGET_STATES:
-            self.source_run.records_skipped += 1
-            return False
-
-        # Year filter — only recent awards produce fresh signals
-        if record.award_year < _MIN_AWARD_YEAR:
+        # Activeness filter — replaces the flat award_year cutoff. Included if
+        # the project is still active (contract_end_date in the future) or the
+        # award is within the recency window.
+        if not _is_active_sbir(record.award_year, record.contract_end_date):
             self.source_run.records_skipped += 1
             return False
 
@@ -666,20 +760,48 @@ class SBIRGrantsConnector:
             self.source_run.records_skipped += 1
             return False
 
-        # Institution filter — Porter cannot factor universities, labs, hospitals, etc.
-        if is_academic(record.firm):
+        # Hard block only unmistakable, non-factorable university names.
+        if _is_exact_academic_name(record.firm):
             self.source_run.records_skipped += 1
             self._log.info(
-                "sbir_academic_skipped",
+                "sbir_exact_academic_hard_blocked",
                 company=record.firm,
                 state=record.state,
                 mode=mode,
             )
             return False
 
+        # Institution soft-flag — universities, labs, hospitals, etc. are still
+        # collected but hidden from sales by default. John decides, not this
+        # filter. Fixed per John Cox Miller, Porter Capital, July 2026.
+        sector_excluded = False
+        sector_excluded_reason: str | None = None
+        if is_academic(record.firm):
+            sector_excluded = True
+            sector_excluded_reason = "Academic institution"
+            self._log.info(
+                "sbir_academic_soft_flagged",
+                company=record.firm,
+                state=record.state,
+                mode=mode,
+            )
+
         strength = signal_strength_for_phase(record.phase)
         phase_display = record.phase or "Unknown Phase"
         program_display = record.program or "SBIR"
+
+        poc_name, poc_title, poc_phone, poc_email = (
+            record.poc_name, record.poc_title, record.poc_phone, record.poc_email,
+        )
+        if _is_government_contact(record.poc_email, record.poc_phone):
+            self._log.info(
+                "sbir_government_contact_filtered",
+                company=record.firm,
+                email=record.poc_email,
+                phone=record.poc_phone,
+                mode=mode,
+            )
+            poc_name = poc_title = poc_phone = poc_email = None
 
         payload: dict = {
             "firm": record.firm,
@@ -698,15 +820,17 @@ class SBIRGrantsConnector:
             "abstract": (record.abstract or "")[:500] if record.abstract else None,
             "uei": record.uei,
             "duns": record.duns,
-            "poc_name": record.poc_name,
-            "poc_title": record.poc_title,
-            "poc_phone": record.poc_phone,
-            "poc_email": record.poc_email,
+            "poc_name": poc_name,
+            "poc_title": poc_title,
+            "poc_phone": poc_phone,
+            "poc_email": poc_email,
             "company_url": record.company_url,
             "number_employees": record.number_employees,
             "sbir_signal_type": "SBIR_GRANT",
             "sbir_signal_strength": strength,
             "sbir_source_mode": mode,
+            "sector_excluded": sector_excluded,
+            "sector_excluded_reason": sector_excluded_reason,
             "description": (
                 f"{program_display} {phase_display} grant of "
                 f"${record.award_amount:,.0f} from "

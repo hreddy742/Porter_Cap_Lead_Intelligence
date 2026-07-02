@@ -32,9 +32,12 @@ from app.pipeline.connectors.sbir_grants import (
     SBIRGrantsConnector,
     is_academic,
     signal_strength_for_phase,
+    _is_government_contact,
+    _is_exact_academic_name,
+    _is_active_sbir,
     _normalize_bulk_row,
     _parse_response,
-    _TARGET_STATES,
+    _ALL_STATES,
     _MIN_AWARD_YEAR,
     _MIN_AWARD_AMOUNT,
 )
@@ -219,9 +222,14 @@ class TestIsAcademic:
         assert is_academic("Birmingham Community College") is True
         assert is_academic("Acme College of Technology") is True
 
-    def test_institute_filtered(self):
-        assert is_academic("Georgia Tech Research Institute") is True
-        assert is_academic("Institute for Advanced Studies") is True
+    def test_bare_institute_no_longer_broad_match(self):
+        """'institute' alone was removed — too broad, collided with legitimate
+        B2B names. Only the precise 'national institute of' phrase matches now."""
+        assert is_academic("Georgia Tech Research Institute") is False
+        assert is_academic("Institute for Advanced Studies") is False
+
+    def test_national_institute_of_filtered(self):
+        assert is_academic("National Institute of Standards and Technology") is True
 
     def test_laboratory_filtered(self):
         assert is_academic("Oak Ridge National Laboratory") is True
@@ -354,37 +362,86 @@ class TestConnectorFilters:
         _, _, source_run = _run_connector([[award], []], **connector_kwargs)
         return source_run
 
-    def test_university_skipped(self):
-        run = self._run_single({"firm": "University of Alabama Research LLC"})
+    def test_university_soft_flagged_not_skipped(self):
+        """Universities are collected and soft-flagged, not hard-blocked, unless
+        the name is an exact match against the tiny hard-block list."""
+        award = _valid_award(firm="University of Alabama Research LLC")
+        session = _make_session()
+        source_run = _make_source_run()
+        with patch("app.pipeline.connectors.sbir_grants._fetch_page", side_effect=[[award], []]):
+            connector = SBIRGrantsConnector(session, source_run, _make_source())
+            connector.run()
+        assert source_run.records_valid == 1
+        assert source_run.records_skipped == 0
+        event = session.add.call_args_list[0][0][0]
+        assert event.payload["sector_excluded"] is True
+        assert event.payload["sector_excluded_reason"] == "Academic institution"
+
+    def test_college_soft_flagged_not_skipped(self):
+        award = _valid_award(firm="Auburn Community College Tech Transfer")
+        session = _make_session()
+        source_run = _make_source_run()
+        with patch("app.pipeline.connectors.sbir_grants._fetch_page", side_effect=[[award], []]):
+            connector = SBIRGrantsConnector(session, source_run, _make_source())
+            connector.run()
+        assert source_run.records_valid == 1
+        event = session.add.call_args_list[0][0][0]
+        assert event.payload["sector_excluded"] is True
+
+    def test_exact_academic_name_hard_blocked(self):
+        """A firm name that is EXACTLY a known university is still hard-blocked."""
+        run = self._run_single({"firm": "MIT"})
         assert run.records_valid == 0
         assert run.records_skipped == 1
 
-    def test_college_skipped(self):
-        run = self._run_single({"firm": "Auburn Community College Tech Transfer"})
-        assert run.records_valid == 0
-        assert run.records_skipped == 1
+    def test_non_academic_not_flagged(self):
+        award = _valid_award(firm="Acme Technology Solutions LLC")
+        session = _make_session()
+        source_run = _make_source_run()
+        with patch("app.pipeline.connectors.sbir_grants._fetch_page", side_effect=[[award], []]):
+            connector = SBIRGrantsConnector(session, source_run, _make_source())
+            connector.run()
+        event = session.add.call_args_list[0][0][0]
+        assert event.payload["sector_excluded"] is False
+        assert event.payload["sector_excluded_reason"] is None
 
     def test_empty_firm_quarantined(self):
         _, _, run = _run_connector([[{"firm": "", "state": "AL", "award_amount": 100000, "award_year": 2024}], []])
         assert run.quarantine_count == 1
         assert run.records_valid == 0
 
-    def test_award_year_before_2022_skipped(self):
-        run = self._run_single({"award_year": 2021})
+    def test_award_year_before_2019_skipped(self):
+        run = self._run_single({"award_year": 2015})
         assert run.records_valid == 0
         assert run.records_skipped == 1
+
+    def test_award_year_2021_now_included(self):
+        """2021 was excluded under the old 2022+ cutoff; the new 7-year window
+        (2019+) includes it."""
+        run = self._run_single({"award_year": 2021})
+        assert run.records_valid == 1
+
+    def test_award_year_2019_boundary_passes(self):
+        run = self._run_single({"award_year": 2019})
+        assert run.records_valid == 1
 
     def test_award_year_2022_passes(self):
         run = self._run_single({"award_year": 2022})
         assert run.records_valid == 1
 
-    def test_state_not_in_target_skipped(self):
-        run = self._run_single({"state": "CA"})
-        assert run.records_valid == 0
-        assert run.records_skipped == 1
+    def test_future_contract_end_date_included_regardless_of_year(self):
+        """An old award year with a future contract_end_date is still active."""
+        run = self._run_single({"award_year": 2015, "contract_end_date": "2099-01-01"})
+        assert run.records_valid == 1
 
-    def test_state_in_target_passes(self):
-        for state in ["AL", "GA", "TN", "FL", "MS", "TX", "VA"]:
+    def test_state_outside_old_icp_now_included(self):
+        """CA was excluded under the old 7-state ICP; the state filter is removed."""
+        run = self._run_single({"state": "CA"})
+        assert run.records_valid == 1
+        assert run.records_skipped == 0
+
+    def test_all_states_included(self):
+        for state in ["AL", "GA", "TN", "FL", "MS", "TX", "VA", "CA", "NY", "WA"]:
             run = self._run_single({"state": state})
             assert run.records_valid == 1, f"Expected valid for state={state}"
 
@@ -838,14 +895,61 @@ class TestExpandedInstitutionFilter:
     def test_association_filtered(self):
         assert is_academic("Association of American Engineers") is True
 
-    def test_foundation_for_filtered(self):
-        assert is_academic("Foundation for Advanced Robotics") is True
+    def test_bare_foundation_for_no_longer_broad_match(self):
+        """'foundation for' alone was removed — too broad."""
+        assert is_academic("Foundation for Advanced Robotics") is False
 
-    def test_center_for_filtered(self):
-        assert is_academic("Center for Applied Physics LLC") is True
+    def test_national_foundation_for_filtered(self):
+        assert is_academic("National Foundation for American Policy") is True
+
+    def test_bare_center_for_no_longer_broad_match(self):
+        """'center for' alone was removed — collided with legitimate B2B names
+        like 'Center for Applied Engineering LLC'."""
+        assert is_academic("Center for Applied Physics LLC") is False
+
+    def test_national_center_for_filtered(self):
+        assert is_academic("National Center for Manufacturing Sciences") is True
 
     def test_normal_company_still_passes(self):
         assert is_academic("Acme Technology Solutions LLC") is False
+        assert is_academic("Center for Applied Engineering LLC") is False
+
+
+# ─── _is_active_sbir() / _is_exact_academic_name() / _ALL_STATES ────────────
+
+
+class TestIsActiveSBIR:
+    def test_future_contract_end_date_always_active(self):
+        assert _is_active_sbir(2015, date(2099, 1, 1)) is True
+
+    def test_past_contract_end_date_falls_back_to_year(self):
+        assert _is_active_sbir(2015, date(2015, 6, 1)) is False
+        assert _is_active_sbir(2023, date(2023, 6, 1)) is True
+
+    def test_no_contract_end_date_uses_year_only(self):
+        assert _is_active_sbir(2019, None) is True
+        assert _is_active_sbir(2018, None) is False
+
+
+class TestIsExactAcademicName:
+    def test_mit_hard_blocked(self):
+        assert _is_exact_academic_name("MIT") is True
+
+    def test_case_and_whitespace_insensitive(self):
+        assert _is_exact_academic_name("  mit  ") is True
+
+    def test_substring_not_hard_blocked(self):
+        """A name merely containing 'MIT' is not exact-matched (soft-flag path instead)."""
+        assert _is_exact_academic_name("MIT Spinoff Technologies LLC") is False
+
+    def test_normal_company_not_hard_blocked(self):
+        assert _is_exact_academic_name("Acme Technology Solutions LLC") is False
+
+
+def test_all_states_covers_all_50():
+    assert len(_ALL_STATES) >= 50
+    assert "CA" in _ALL_STATES
+    assert "AL" in _ALL_STATES
 
 
 # ─── _normalize_bulk_row() — bulk CSV headers -> API field names ────────────
@@ -877,19 +981,28 @@ class TestBulkMode:
         assert source_run.records_valid == 1
         assert source_run.records_fetched == 1
 
-    def test_bulk_full_state_name_passes_target_filter(self):
+    def test_bulk_full_state_name_normalizes(self):
         row = _valid_bulk_row(State="Georgia")
         _, _, source_run = _run_dual_mode(bulk_rows=[row])
         assert source_run.records_valid == 1
 
-    def test_bulk_state_outside_target_skipped(self):
+    def test_bulk_state_outside_old_icp_now_included(self):
+        """California was excluded under the old 7-state ICP; the filter is removed."""
         row = _valid_bulk_row(State="California")
         _, _, source_run = _run_dual_mode(bulk_rows=[row])
-        assert source_run.records_valid == 0
-        assert source_run.records_skipped == 1
+        assert source_run.records_valid == 1
+        assert source_run.records_skipped == 0
 
-    def test_bulk_academic_institution_skipped(self):
+    def test_bulk_academic_institution_soft_flagged(self):
         row = _valid_bulk_row(Company="University of Alabama Research LLC")
+        _, session, source_run = _run_dual_mode(bulk_rows=[row])
+        assert source_run.records_valid == 1
+        assert source_run.records_skipped == 0
+        event = session.add.call_args_list[0][0][0]
+        assert event.payload["sector_excluded"] is True
+
+    def test_bulk_exact_academic_name_hard_blocked(self):
+        row = _valid_bulk_row(Company="MIT")
         _, _, source_run = _run_dual_mode(bulk_rows=[row])
         assert source_run.records_valid == 0
         assert source_run.records_skipped == 1
@@ -1097,3 +1210,94 @@ class TestSBIRContactEnrichmentEvidence:
         assert item.extracted_fields["poc_phone"] is None
         assert item.extracted_fields["poc_email"] is None
         assert item.extracted_fields["employee_count"] is None
+
+
+# ─── _is_government_contact() — filter agency program officers, not company staff ──
+
+
+class TestIsGovernmentContact:
+    def test_mil_email_flagged(self):
+        assert _is_government_contact("brian.kemp@us.af.mil", None) is True
+
+    def test_gov_email_flagged(self):
+        assert _is_government_contact("someone@nasa.gov", None) is True
+
+    def test_army_mil_flagged(self):
+        assert _is_government_contact("jane.doe@army.mil", None) is True
+
+    def test_navy_mil_flagged(self):
+        assert _is_government_contact("jane.doe@navy.mil", None) is True
+
+    def test_marines_mil_flagged(self):
+        assert _is_government_contact("jane.doe@marines.mil", None) is True
+
+    def test_uscg_mil_flagged(self):
+        assert _is_government_contact("jane.doe@uscg.mil", None) is True
+
+    def test_afwerx_flagged(self):
+        assert _is_government_contact("outreach@afwerx.com", None) is True
+
+    def test_sbir_at_prefix_flagged(self):
+        assert _is_government_contact("SBIR@AFWERX.AF.MIL", None) is True
+
+    def test_case_insensitive(self):
+        assert _is_government_contact("Jane.Doe@ARMY.MIL", None) is True
+
+    def test_placeholder_phone_flagged(self):
+        assert _is_government_contact(None, "9999999999") is True
+
+    def test_placeholder_phone_with_dashes_flagged(self):
+        assert _is_government_contact(None, "999-999-9999") is True
+
+    def test_genuine_company_contact_passes(self):
+        assert _is_government_contact("jane@acmetech.com", "2055551234") is False
+
+    def test_none_email_and_phone_passes(self):
+        assert _is_government_contact(None, None) is False
+
+    def test_empty_string_passes(self):
+        assert _is_government_contact("", "") is False
+
+
+# ─── Government contact filtering wired into the connector ──────────────────
+
+
+class TestGovernmentContactFiltering:
+    def test_bulk_government_email_nulled_but_record_still_stored(self):
+        row = _valid_bulk_row(
+            **{"Contact Name": "Brian Kemp", "Contact Title": "Program Manager",
+               "Contact Phone": "8017755378", "Contact Email": "brian.kemp@us.af.mil"}
+        )
+        _, session, source_run = _run_dual_mode(bulk_rows=[row])
+        assert source_run.records_valid == 1  # record itself is not skipped
+        event = session.add.call_args_list[0][0][0]
+        assert event.payload["poc_name"] is None
+        assert event.payload["poc_title"] is None
+        assert event.payload["poc_phone"] is None
+        assert event.payload["poc_email"] is None
+        # Non-contact fields are untouched
+        assert event.payload["firm"] == row["Company"]
+        assert event.payload["company_url"] == row["Company Website"]
+
+    def test_bulk_placeholder_phone_nulled(self):
+        row = _valid_bulk_row(**{"Contact Phone": "9999999999", "Contact Email": ""})
+        _, session, source_run = _run_dual_mode(bulk_rows=[row])
+        event = session.add.call_args_list[0][0][0]
+        assert event.payload["poc_phone"] is None
+        assert event.payload["poc_name"] is None
+
+    def test_bulk_genuine_contact_preserved(self):
+        row = _valid_bulk_row()  # default has a genuine company contact
+        _, session, source_run = _run_dual_mode(bulk_rows=[row])
+        event = session.add.call_args_list[0][0][0]
+        assert event.payload["poc_name"] == "Jane Doe"
+        assert event.payload["poc_phone"] == "2055551234"
+        assert event.payload["poc_email"] == "jane@acmetech.com"
+
+    def test_api_government_email_nulled(self):
+        award = _valid_award(poc_name="Brian Kemp", poc_phone="8017755378", poc_email="brian.kemp@us.af.mil")
+        connector, session, source_run = _run_connector([[award], []])
+        event = session.add.call_args_list[0][0][0]
+        assert event.payload["poc_email"] is None
+        assert event.payload["poc_phone"] is None
+        assert event.payload["poc_name"] is None
