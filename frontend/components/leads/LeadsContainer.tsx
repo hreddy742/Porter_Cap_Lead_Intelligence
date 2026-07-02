@@ -132,6 +132,9 @@ const SIGNAL_CHIPS: { label: string; value: string }[] = [
   { label: "SBA PIF", value: "SBA_LOAN_PIF" },
   { label: "SBA Active", value: "SBA_LOAN_ACTIVE" },
   { label: "SBIR Grant", value: "SBIR_GRANT" },
+  { label: "Federal Grant", value: "FEDERAL_GRANT" },
+  { label: "IDV Contract", value: "IDV_AWARD" },
+  { label: "SBA Pending", value: "SBA_LOAN_PENDING" },
 ];
 
 const STATUS_CHIPS = ["approved", "contacted", "rejected", "research"];
@@ -426,6 +429,9 @@ export default function LeadsContainer({
                 const isSBAPIF = lead.signal_type === "SBA_LOAN_PIF";
                 const isSBAActive = lead.signal_type === "SBA_LOAN_ACTIVE";
                 const isSBIR = lead.signal_type === "SBIR_GRANT";
+                const isFederalGrant = lead.signal_type === "FEDERAL_GRANT";
+                const isIDV = lead.signal_type === "IDV_AWARD";
+                const isSBAPending = lead.signal_type === "SBA_LOAN_PENDING";
                 const pal = avatarPalette(lead.company_name);
                 const initials = getInitials(lead.company_name);
                 const rowBg = idx % 2 === 0 ? "#FFFFFF" : "#FAFAFA";
@@ -442,6 +448,9 @@ export default function LeadsContainer({
                     isSBAPIF={isSBAPIF}
                     isSBAActive={isSBAActive}
                     isSBIR={isSBIR}
+                    isFederalGrant={isFederalGrant}
+                    isIDV={isIDV}
+                    isSBAPending={isSBAPending}
                     pal={pal}
                     initials={initials}
                   />
@@ -587,11 +596,29 @@ interface RowProps {
   isSBAPIF: boolean;
   isSBAActive: boolean;
   isSBIR: boolean;
+  isFederalGrant: boolean;
+  isIDV: boolean;
+  isSBAPending: boolean;
   pal: { bg: string; text: string };
   initials: string;
 }
 
-function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, isSBAPIF, isSBAActive, isSBIR, pal, initials }: RowProps) {
+function LeadRow({
+  lead,
+  rowBg,
+  rowH,
+  tierCfg,
+  isPrime,
+  isSub,
+  isSBAPIF,
+  isSBAActive,
+  isSBIR,
+  isFederalGrant,
+  isIDV,
+  isSBAPending,
+  pal,
+  initials,
+}: RowProps) {
   const [hovered, setHovered] = useState(false);
 
   const naics = lead.company_naics ?? "—";
@@ -810,6 +837,57 @@ function LeadRow({ lead, rowBg, rowH, tierCfg, isPrime, isSub, isSBAPIF, isSBAAc
               }}
             >
               🔬 SBIR Grant
+            </span>
+          ) : isFederalGrant ? (
+            <span
+              title="Federal grant or cooperative agreement"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                padding: "3px 7px",
+                borderRadius: 4,
+                fontSize: 10,
+                fontWeight: 500,
+                background: "rgba(37,99,235,0.10)",
+                border: "0.5px solid rgba(37,99,235,0.40)",
+                color: "#2563EB",
+              }}
+            >
+              📋 Federal Grant
+            </span>
+          ) : isIDV ? (
+            <span
+              title="Indefinite delivery vehicle — ongoing contract"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                padding: "3px 7px",
+                borderRadius: 4,
+                fontSize: 10,
+                fontWeight: 500,
+                background: "rgba(124,58,237,0.10)",
+                border: "0.5px solid rgba(124,58,237,0.40)",
+                color: "#7C3AED",
+              }}
+            >
+              🔄 IDV Contract
+            </span>
+          ) : isSBAPending ? (
+            <span
+              title="SBA loan just approved — company actively needs working capital now"
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                padding: "3px 7px",
+                borderRadius: 4,
+                fontSize: 10,
+                fontWeight: 500,
+                background: "rgba(22,163,74,0.15)",
+                border: "0.5px solid rgba(22,163,74,0.50)",
+                color: "#16A34A",
+              }}
+            >
+              ⚡ SBA Pending
             </span>
           ) : (
             <span style={{ fontSize: 12, color: "#A1A1AA" }}>—</span>

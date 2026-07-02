@@ -58,7 +58,6 @@ _FIELDS = [
     "Awarding Agency",
     "generated_internal_id",
     "Award Type",
-    "Period of Performance Current End Date",
 ]
 
 # Contracts (A-D), grants (04 Project Grants, 05 Cooperative Agreements), and
@@ -369,7 +368,14 @@ class USASpendingConnector:
                 self.fiscal_year - offset for offset in range(self.lookback_years)
             ]
 
-        with httpx.Client(timeout=self.timeout) as client:
+        # max_keepalive_connections=0 forces a fresh TCP/TLS connection per
+        # request. Deep pagination (~50 requests) was reliably hitting
+        # "Server disconnected without sending a response" on a reused
+        # keep-alive connection — consistent with a proxy/firewall silently
+        # dropping long-lived connections after N requests. A single manual
+        # request to the same failing page always succeeded.
+        limits = httpx.Limits(max_keepalive_connections=0)
+        with httpx.Client(timeout=self.timeout, limits=limits) as client:
             for fy in fiscal_years:
                 page = 1
                 while True:

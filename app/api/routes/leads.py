@@ -100,6 +100,10 @@ def list_leads(
                     "SUBCONTRACT_AWARD",
                     "SBA_LOAN_PIF",
                     "SBA_LOAN_ACTIVE",
+                    "SBA_LOAN_PENDING",
+                    "SBIR_GRANT",
+                    "FEDERAL_GRANT",
+                    "IDV_AWARD",
                 ]),
             )
             .order_by(Signal.signal_date.desc())

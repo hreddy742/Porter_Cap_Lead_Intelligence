@@ -641,7 +641,7 @@ def test_timeout_env_var_passed_to_client():
                     )
                     connector.run()
 
-    mock_cls.assert_called_once_with(timeout=45.0)
+    assert mock_cls.call_args.kwargs["timeout"] == 45.0
 
 
 # ─── Test 22: RemoteProtocolError retries then succeeds ──────────────────────
