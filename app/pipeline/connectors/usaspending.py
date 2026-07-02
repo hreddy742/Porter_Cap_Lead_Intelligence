@@ -28,7 +28,7 @@ import json
 import os
 import random
 import time
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
 
 import httpx
@@ -57,15 +57,33 @@ _FIELDS = [
     "pop_state_code",
     "Awarding Agency",
     "generated_internal_id",
+    "Award Type",
+    "Period of Performance Current End Date",
 ]
 
-_AWARD_TYPE_CODES = ["A", "B", "C", "D"]  # contracts only (excludes grants/loans)
+# Contracts (A-D), grants (04 Project Grants, 05 Cooperative Agreements), and
+# IDVs. Deliberately excludes Block/Formula Grants (02/03 — go to state
+# governments), Direct/Guaranteed Loans (07/08 — 08 duplicates the SBA
+# connector), and Direct Payments (06,09,10,11 — not B2B companies).
+# Fixed per John Cox Miller, Porter Capital, July 2026.
+_AWARD_TYPE_CODES = [
+    "A", "B", "C", "D",
+    "04", "05",
+    "IDV_A", "IDV_B", "IDV_B_A", "IDV_B_B", "IDV_B_C", "IDV_C", "IDV_D", "IDV_E",
+]
 
-# ICP sectors confirmed by John Cox Miller,
-# Porter Capital, June 24 2026.
-# Soft-flagged excluded sectors (11,22,23,52,61,
-# 62,71,92) are not targeted here but are stored
-# if found via other signals.
+# IDV award type codes — used to classify claim_supported as IDV_AWARD.
+_IDV_AWARD_TYPE_CODES = frozenset({
+    "IDV_A", "IDV_B", "IDV_B_A", "IDV_B_B", "IDV_B_C", "IDV_C", "IDV_D", "IDV_E",
+})
+# Grant award type codes — used to classify claim_supported as FEDERAL_GRANT.
+_GRANT_AWARD_TYPE_CODES = frozenset({"04", "05"})
+
+# Historical ICP-sector whitelist. No longer used to filter the API request —
+# per John Cox Miller, Porter Capital, July 2026, NAICS filtering was removed
+# entirely from this connector so all sectors are collected; gates.py handles
+# soft-flagging of excluded sectors instead of this connector hard-blocking
+# them by never fetching them in the first place.
 _TARGET_NAICS_PREFIXES = frozenset({
     # Original ICP sectors
     "31", "32", "33",  # Manufacturing
@@ -85,6 +103,11 @@ _TARGET_NAICS_PREFIXES = frozenset({
 
 _RETRYABLE_HTTP_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 
+# $0 and tiny amounts are administrative modifications (de-obligations,
+# corrections), not real awards. Fixed per John Cox Miller, Porter Capital,
+# July 2026.
+_MIN_AWARD_AMOUNT = Decimal("10000")
+
 
 class ConnectorError(Exception):
     """Raised when all retry attempts for a transient connector error are exhausted."""
@@ -103,6 +126,45 @@ def _current_fiscal_year() -> int:
 def _fiscal_year_range(fy: int) -> tuple[str, str]:
     """Return ISO (start_date, end_date) for a US fiscal year."""
     return f"{fy - 1}-10-01", f"{fy}-09-30"
+
+
+def classify_award_type(award_type_code: str | None) -> str:
+    """Map a raw 'Award Type' response value to a signal claim type.
+
+    IDV codes -> IDV_AWARD, grant codes -> FEDERAL_GRANT, everything else
+    (contracts A-D) -> CONTRACT_AWARD. Matching is done on the code itself
+    when the API echoes it back, falling back to keyword matching against a
+    human-readable description (e.g. "IDV", "GRANT", "COOPERATIVE AGREEMENT")
+    since USASpending's exact response format for this field is unverified —
+    flagged for UAT confirmation.
+    """
+    if not award_type_code:
+        return "CONTRACT_AWARD"
+    code = award_type_code.strip().upper()
+    if code in _IDV_AWARD_TYPE_CODES or "IDV" in code:
+        return "IDV_AWARD"
+    if code in _GRANT_AWARD_TYPE_CODES or "GRANT" in code or "COOPERATIVE AGREEMENT" in code:
+        return "FEDERAL_GRANT"
+    return "CONTRACT_AWARD"
+
+
+def _is_active_award(
+    award_date: date,
+    pop_end_date: date | None,
+    lookback_years: int,
+) -> bool:
+    """True if the project is still running or the award is recent.
+
+    Include if EITHER the period of performance end date is in the future
+    (project still active) OR the award was made within the lookback window
+    (recent award, likely still relevant). Fixed per John Cox Miller, Porter
+    Capital, July 2026.
+    """
+    today = date.today()
+    if pop_end_date is not None and pop_end_date >= today:
+        return True
+    cutoff = today - timedelta(days=365 * lookback_years)
+    return award_date >= cutoff
 
 
 def _env_float(var: str, default: float) -> float:
@@ -145,6 +207,10 @@ class USASpendingRecord(BaseModel):
     generated_internal_id: str | None = Field(None)
     action_type: str | None = Field(None, alias="Action Type")
     action_type_description: str | None = Field(None, alias="Action Type Description")
+    award_type: str | None = Field(None, alias="Award Type")
+    period_of_performance_current_end_date: date | None = Field(
+        None, alias="Period of Performance Current End Date"
+    )
 
     @field_validator("award_id", mode="before")
     @classmethod
@@ -170,8 +236,11 @@ class USASpendingRecord(BaseModel):
             amount = Decimal(str(v))
         except (InvalidOperation, TypeError, ValueError):
             raise ValueError(f"award_amount must be numeric, got {v!r}")
-        if amount <= 0:
-            raise ValueError(f"award_amount must be positive, got {amount}")
+        if amount < _MIN_AWARD_AMOUNT:
+            raise ValueError(
+                f"award_amount must be >= {_MIN_AWARD_AMOUNT} (administrative "
+                f"noise below that), got {amount}"
+            )
         return amount
 
     @field_validator("award_date", mode="before")
@@ -185,6 +254,20 @@ class USASpendingRecord(BaseModel):
             except ValueError:
                 raise ValueError(f"award_date must be an ISO date string, got {v!r}")
         raise ValueError(f"award_date expected str or date, got {type(v).__name__}")
+
+    @field_validator("period_of_performance_current_end_date", mode="before")
+    @classmethod
+    def parse_pop_end_date(cls, v: object) -> date | None:
+        if v is None or v == "":
+            return None
+        if isinstance(v, date):
+            return v
+        if isinstance(v, str):
+            try:
+                return date.fromisoformat(v)
+            except ValueError:
+                return None
+        return None
 
     @field_validator("recipient_uei", mode="before")
     @classmethod
@@ -236,7 +319,12 @@ class USASpendingConnector:
         self.session = session
         self.source_run = source_run
         self.source = source
+        # An explicit fiscal_year pins the connector to a single year (used by
+        # tests and manual backfills). When omitted, the connector fetches
+        # USASPENDING_LOOKBACK_YEARS fiscal years ending at the current one.
+        self._explicit_fiscal_year = fiscal_year is not None
         self.fiscal_year = fiscal_year or _current_fiscal_year()
+        self.lookback_years = _env_int("USASPENDING_LOOKBACK_YEARS", 3)
 
         page_limit_raw = os.getenv("USASPENDING_PAGE_LIMIT")
         max_pages_raw = os.getenv("USASPENDING_MAX_PAGES")
@@ -271,25 +359,37 @@ class USASpendingConnector:
     # ── Private ───────────────────────────────────────────────────────────────
 
     def _fetch_all_pages(self) -> None:
-        page = 1
-        with httpx.Client(timeout=self.timeout) as client:
-            while True:
-                results, has_next = self._fetch_page(client, page)
-                for raw in results:
-                    self._process_record(raw)
-                if not has_next:
-                    break
-                if self.max_pages is not None and page >= self.max_pages:
-                    break
-                page += 1
+        # Explicit fiscal_year (tests, manual backfills) pins to that single
+        # year. Otherwise fetch USASPENDING_LOOKBACK_YEARS fiscal years ending
+        # at the current one, per John Cox Miller, Porter Capital, July 2026.
+        if self._explicit_fiscal_year:
+            fiscal_years = [self.fiscal_year]
+        else:
+            fiscal_years = [
+                self.fiscal_year - offset for offset in range(self.lookback_years)
+            ]
 
-    def _fetch_page(self, client: httpx.Client, page: int) -> tuple[list[dict], bool]:
-        start_date, end_date = _fiscal_year_range(self.fiscal_year)
+        with httpx.Client(timeout=self.timeout) as client:
+            for fy in fiscal_years:
+                page = 1
+                while True:
+                    results, has_next = self._fetch_page(client, page, fy)
+                    for raw in results:
+                        self._process_record(raw)
+                    if not has_next:
+                        break
+                    if self.max_pages is not None and page >= self.max_pages:
+                        break
+                    page += 1
+
+    def _fetch_page(
+        self, client: httpx.Client, page: int, fiscal_year: int | None = None
+    ) -> tuple[list[dict], bool]:
+        start_date, end_date = _fiscal_year_range(fiscal_year or self.fiscal_year)
         body = {
             "filters": {
                 "award_type_codes": _AWARD_TYPE_CODES,
                 "time_period": [{"start_date": start_date, "end_date": end_date}],
-                "naics_codes": sorted(_TARGET_NAICS_PREFIXES),
             },
             "fields": _FIELDS,
             "page": page,
@@ -360,6 +460,20 @@ class USASpendingConnector:
                 "usaspending_validation_failure",
                 award_id=raw.get("Award ID"),
                 error=str(exc),
+            )
+            return
+
+        if not _is_active_award(
+            record.award_date,
+            record.period_of_performance_current_end_date,
+            self.lookback_years,
+        ):
+            self.source_run.records_skipped += 1
+            self._log.info(
+                "usaspending_record_not_active_skip",
+                award_id=record.award_id,
+                award_date=str(record.award_date),
+                pop_end_date=str(record.period_of_performance_current_end_date),
             )
             return
 

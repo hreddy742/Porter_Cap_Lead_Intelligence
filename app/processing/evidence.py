@@ -33,6 +33,7 @@ import structlog
 from sqlalchemy.orm import Session
 
 from app.db.models import EvidenceItem, RawSourceEvent
+from app.pipeline.connectors.usaspending import classify_award_type
 
 logger = structlog.get_logger(__name__)
 
@@ -141,20 +142,31 @@ def _extract_prime_award_evidence(
         "awarding_agency": payload.get("Awarding Agency"),
         "action_type": payload.get("Action Type"),
         "action_type_description": payload.get("Action Type Description"),
+        "award_type": payload.get("Award Type"),
+        "period_of_performance_current_end_date": payload.get(
+            "Period of Performance Current End Date"
+        ),
     }
+
+    # Award type determines claim_supported: contracts (A-D) -> CONTRACT_AWARD,
+    # grants (04/05) -> FEDERAL_GRANT, IDVs -> IDV_AWARD. Fixed per John Cox
+    # Miller, Porter Capital, July 2026.
+    claim_supported = classify_award_type(payload.get("Award Type"))
 
     freshness = _compute_freshness(action_date)
     evidence = _build_evidence_item(
         raw_event=raw_event,
         source_url=source_url,
         extracted_fields=extracted_fields,
-        claim_supported=_CLAIM_CONTRACT_AWARD,
+        claim_supported=claim_supported,
         confidence_score=_CONFIDENCE_API,
         freshness=freshness,
     )
     db.add(evidence)
     db.flush()
-    log.info("evidence_extracted", award_id=award_id, freshness=freshness)
+    log.info(
+        "evidence_extracted", award_id=award_id, claim=claim_supported, freshness=freshness
+    )
     return [evidence]
 
 

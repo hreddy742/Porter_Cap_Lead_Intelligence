@@ -296,13 +296,15 @@ def test_page_limit_env_var_sent_in_request():
     assert sent_body["limit"] == 10, "request body must reflect the env var page limit"
 
 
-# ─── Test 8: NAICS filter present in request body ────────────────────────────
+# ─── Test 8: NAICS filter removed from request body ──────────────────────────
 
 
-def test_naics_filter_sent_in_request_body():
+def test_naics_filter_not_sent_in_request_body():
     """
-    The connector must send naics_codes in filters so the API returns
-    AR-heavy industry transactions rather than all federal contracts.
+    The connector must NOT send naics_codes in filters — all sectors are
+    collected now; gates.py handles soft-flagging of excluded sectors instead
+    of this connector hard-blocking them by never fetching them. Fixed per
+    John Cox Miller, Porter Capital, July 2026.
     """
     pages = [_mock_response([_award(1)], has_next=False)]
 
@@ -311,8 +313,7 @@ def test_naics_filter_sent_in_request_body():
     call_kwargs = mock_client.post.call_args
     sent_body = call_kwargs.kwargs.get("json") or call_kwargs.args[1]
     filters = sent_body.get("filters", {})
-    assert "naics_codes" in filters, "filters must include naics_codes"
-    assert len(filters["naics_codes"]) > 0, "naics_codes filter must not be empty"
+    assert "naics_codes" not in filters, "naics_codes filter must be removed"
 
 
 # ─── Test 9: Action Date sort sent in request body ───────────────────────────
@@ -360,8 +361,9 @@ def test_request_targets_spending_by_transaction_endpoint():
 
 def test_award_type_codes_sent_in_request_body():
     """
-    Award type codes A/B/C/D filter to contracts only (excludes grants/loans).
-    The connector must include all four codes so we do not miss any contract type.
+    Award type codes must cover contracts (A-D), grants (04/05), and IDVs —
+    but not block/formula grants (02/03), loans (07/08), or direct payments
+    (06,09,10,11). Fixed per John Cox Miller, Porter Capital, July 2026.
     """
     pages = [_mock_response([_award(1)], has_next=False)]
 
@@ -371,9 +373,14 @@ def test_award_type_codes_sent_in_request_body():
     sent_body = call_kwargs.kwargs.get("json") or call_kwargs.args[1]
     filters = sent_body.get("filters", {})
     codes = set(filters.get("award_type_codes", []))
-    assert codes == {"A", "B", "C", "D"}, (
-        f"award_type_codes must be exactly {{A, B, C, D}}, got {codes}"
-    )
+    expected = {
+        "A", "B", "C", "D",
+        "04", "05",
+        "IDV_A", "IDV_B", "IDV_B_A", "IDV_B_B", "IDV_B_C", "IDV_C", "IDV_D", "IDV_E",
+    }
+    assert codes == expected, f"award_type_codes must be exactly {expected}, got {codes}"
+    for excluded in ("02", "03", "07", "08", "06", "09", "10", "11"):
+        assert excluded not in codes, f"{excluded} must not be included (routes to non-B2B leads)"
 
 
 # ─── Test 12: generated_internal_id requested in API fields ──────────────────
@@ -724,3 +731,161 @@ def test_expanded_naics_sectors_in_connector() -> None:
     assert "55" in _TARGET_NAICS_PREFIXES
     assert "72" in _TARGET_NAICS_PREFIXES
     assert "81" in _TARGET_NAICS_PREFIXES
+
+
+# ─── Test 25: $0/tiny amounts rejected, $10k+ accepted ────────────────────────
+
+
+def test_amount_below_minimum_quarantined():
+    """
+    award_amount below $10,000 is administrative noise (de-obligations,
+    corrections) and must be quarantined, not stored.
+    """
+    tiny = _award(1)
+    tiny["Transaction Amount"] = 500.0
+    pages = [_mock_response([tiny], has_next=False)]
+
+    source_run, _session, _client = _run_connector(responses=pages)
+
+    assert source_run.quarantine_count == 1
+    assert source_run.records_valid == 0
+
+
+def test_amount_at_minimum_accepted():
+    """award_amount exactly at the $10,000 floor is accepted."""
+    edge = _award(1)
+    edge["Transaction Amount"] = 10_000.0
+    pages = [_mock_response([edge], has_next=False)]
+
+    source_run, _session, _client = _run_connector(responses=pages)
+
+    assert source_run.quarantine_count == 0
+    assert source_run.records_valid == 1
+
+
+# ─── Test 26: activeness-based date filter ────────────────────────────────────
+
+
+def test_active_project_future_pop_end_date_included():
+    """
+    An old action_date but a period_of_performance_current_end_date in the
+    future must still be included — the project is still running.
+    """
+    old_but_active = _award(1)
+    old_but_active["Action Date"] = "2019-01-01"
+    old_but_active["Period of Performance Current End Date"] = "2099-01-01"
+    pages = [_mock_response([old_but_active], has_next=False)]
+
+    source_run, _session, _client = _run_connector(responses=pages)
+
+    assert source_run.records_valid == 1
+    assert source_run.records_skipped == 0
+
+
+def test_expired_and_old_award_excluded():
+    """
+    An award with no future period-of-performance end date and an action_date
+    older than the lookback window must be skipped (records_skipped, not
+    quarantined — it passed validation, it's just not active/recent).
+    """
+    stale = _award(1)
+    stale["Action Date"] = "2015-01-01"
+    stale["Period of Performance Current End Date"] = "2015-06-01"
+    pages = [_mock_response([stale], has_next=False)]
+
+    source_run, _session, _client = _run_connector(responses=pages)
+
+    assert source_run.records_valid == 0
+    assert source_run.records_skipped == 1
+
+
+def test_recent_award_without_pop_end_date_included():
+    """
+    An award within the lookback window with no period-of-performance end
+    date at all must still be included via the recency branch.
+    """
+    recent = _award(1)  # Action Date 2025-03-15, no pop end date field
+    pages = [_mock_response([recent], has_next=False)]
+
+    source_run, _session, _client = _run_connector(responses=pages)
+
+    assert source_run.records_valid == 1
+
+
+# ─── Test 27: multi-year backfill ─────────────────────────────────────────────
+
+
+def test_multiyear_backfill_when_fiscal_year_not_pinned():
+    """
+    When fiscal_year is not explicitly passed to the connector, it fetches
+    USASPENDING_LOOKBACK_YEARS fiscal years (default 3), issuing one request
+    per fiscal year.
+    """
+    pages = [
+        _mock_response([], has_next=False),
+        _mock_response([], has_next=False),
+        _mock_response([], has_next=False),
+    ]
+    session = _make_session()
+    source = _make_source()
+    source_run = _make_source_run()
+
+    env_patch = {
+        "USASPENDING_MAX_PAGES": "",
+        "USASPENDING_PAGE_LIMIT": "",
+        "USASPENDING_TIMEOUT_SECONDS": "",
+        "USASPENDING_MAX_RETRIES": "",
+        "USASPENDING_BACKOFF_BASE_SECONDS": "",
+        "USASPENDING_BACKOFF_MAX_SECONDS": "",
+        "USASPENDING_LOOKBACK_YEARS": "3",
+    }
+
+    with patch("app.pipeline.connectors.usaspending.httpx.Client") as mock_cls:
+        mock_client = MagicMock()
+        mock_cls.return_value.__enter__.return_value = mock_client
+        mock_client.post.side_effect = pages
+
+        with patch("app.pipeline.connectors.usaspending.time.sleep"):
+            with patch("app.pipeline.connectors.usaspending.random.uniform", return_value=0.0):
+                with patch.dict("os.environ", env_patch):
+                    connector = USASpendingConnector(session, source_run, source)
+                    connector.run()
+
+    assert mock_client.post.call_count == 3, "one request per lookback year"
+    assert source_run.status == "completed"
+
+
+def test_explicit_fiscal_year_stays_single_year():
+    """
+    Passing fiscal_year explicitly (as tests and manual backfills do) must
+    NOT trigger multi-year backfill — exactly one request is made.
+    """
+    pages = [_mock_response([_award(1)], has_next=False)]
+
+    _source_run, _session, mock_client = _run_connector(responses=pages)
+
+    assert mock_client.post.call_count == 1, "explicit fiscal_year must stay single-year"
+
+
+# ─── Test 28: award type classification ───────────────────────────────────────
+
+
+def test_classify_award_type_contract():
+    from app.pipeline.connectors.usaspending import classify_award_type
+
+    assert classify_award_type(None) == "CONTRACT_AWARD"
+    assert classify_award_type("DEFINITIVE CONTRACT") == "CONTRACT_AWARD"
+
+
+def test_classify_award_type_idv():
+    from app.pipeline.connectors.usaspending import classify_award_type
+
+    assert classify_award_type("IDV_B_A") == "IDV_AWARD"
+    assert classify_award_type("IDV") == "IDV_AWARD"
+
+
+def test_classify_award_type_grant():
+    from app.pipeline.connectors.usaspending import classify_award_type
+
+    assert classify_award_type("04") == "FEDERAL_GRANT"
+    assert classify_award_type("COOPERATIVE AGREEMENT") == "FEDERAL_GRANT"

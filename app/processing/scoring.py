@@ -55,7 +55,12 @@ _AR_HEAVY_NAICS = ("54", "56", "33", "48", "23", "62")
 
 # Signal types that count as contract award evidence for scoring.
 # SUBCONTRACT_AWARD is emitted by the usaspending_subawards connector.
-_AWARD_SIGNAL_TYPES = frozenset({"CONTRACT_AWARD", "SUBCONTRACT_AWARD"})
+# FEDERAL_GRANT (project grants/cooperative agreements) and IDV_AWARD (indefinite
+# delivery vehicles) score identically to CONTRACT_AWARD for now — AI will refine
+# later. Added per John Cox Miller, Porter Capital, July 2026.
+_AWARD_SIGNAL_TYPES = frozenset(
+    {"CONTRACT_AWARD", "SUBCONTRACT_AWARD", "FEDERAL_GRANT", "IDV_AWARD"}
+)
 
 # SBA signal types — bonuses scale with freshness (loan recency).
 # Max values confirmed by John Cox Miller, Porter Capital, June 25 2026:
