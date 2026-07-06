@@ -22,6 +22,7 @@ DATABASE_URL = os.environ.get(
 engine = create_engine(
     DATABASE_URL,
     pool_pre_ping=True,      # verify connections are alive
+    pool_recycle=3600,       # recycle connections hourly (Windows TCP keepalive drops long-idle ones)
     pool_size=5,
     max_overflow=10,
 )

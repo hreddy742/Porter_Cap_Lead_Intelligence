@@ -11,12 +11,12 @@ Key differences from the prime-award connector (usaspending.py):
 
   Endpoint:      /api/v2/subawards/   (not /search/spending_by_transaction/)
   Response keys: lowercase (recipient_name, amount, action_date)
-  Sort:          "amount" descending — id desc was the original sort but it
-                 surfaces the most-recently uploaded batch first, which is
-                 currently dominated by CCDBG childcare subgrants (99%+ noise).
-                 amount desc targets the $1M–$30M manufacturing/defense/staffing
-                 subcontracts in Porter's ICP. The $1B Pydantic cap silently
-                 absorbs the corrupted trillion-dollar rows at pages 1–N.
+  Sort:          "id" descending (most recent first). amount desc was tried
+                 in July 2026 to dodge a CCDBG childcare batch, but it surfaces
+                 the API's corrupted rows first (amounts like $39 trillion),
+                 all of which fail the $10K-$50M validator — pages of
+                 quarantines before any real data. Noise keywords now
+                 soft-flag instead of hard-block, so id desc is safe again.
                  action_date sort still avoided — it returns year-6010 dates.
   Filters:       NOT USED — the subawards endpoint accepts filter keys but
                  silently ignores them (verified by testing all documented
@@ -67,6 +67,7 @@ import httpx
 import structlog
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 from sqlalchemy.orm import Session
 
 from app.db.models import RawSourceEvent, SourceRegistry, SourceRun
@@ -343,6 +344,9 @@ class USASpendingSubawardsConnector:
     """
 
     PAGE_LIMIT = 100
+    BATCH_COMMIT_SIZE = 500  # commit periodically instead of one giant transaction —
+    # long-running single transactions get killed by Windows TCP keepalive
+    # ("Software caused connection abort", WSAECONNABORTED / 10053).
 
     def __init__(
         self,
@@ -387,13 +391,21 @@ class USASpendingSubawardsConnector:
             self._log.error("usaspending_subawards_run_failed", error=str(exc))
         finally:
             self.source_run.finished_at = _utcnow()
-            self.session.commit()
+            try:
+                self.session.commit()
+            except OperationalError as exc:
+                self._log.error(
+                    "usaspending_subawards_final_commit_failed",
+                    error=str(exc),
+                )
+                self.session.rollback()
 
     # ── Private ───────────────────────────────────────────────────────────────
 
     def _fetch_all_pages(self) -> None:
         page = self.start_page
         pages_fetched = 0
+        pending_raw_records: list[dict] = []
         with httpx.Client(timeout=self.timeout) as client:
             while True:
                 results, has_next = self._fetch_page(client, page)
@@ -405,27 +417,66 @@ class USASpendingSubawardsConnector:
                     has_next=has_next,
                 )
                 for raw in results:
+                    pending_raw_records.append(raw)
                     self._process_record(raw)
+                    if len(pending_raw_records) >= self.BATCH_COMMIT_SIZE:
+                        self._commit_batch(pending_raw_records)
+                        pending_raw_records = []
                 if not has_next:
                     break
                 if self.max_pages is not None and pages_fetched >= self.max_pages:
                     break
                 page += 1
+        if pending_raw_records:
+            self._commit_batch(pending_raw_records)
+
+    def _commit_batch(self, batch_raw_records: list[dict]) -> None:
+        """
+        Commit the current batch. On a dropped connection (Windows TCP
+        keepalive abort), roll back, let pool_pre_ping hand out a fresh
+        connection, and replay this batch's records so nothing is lost —
+        the previously committed batches are unaffected.
+        """
+        for attempt in range(self.max_retries + 1):
+            try:
+                self.session.commit()
+                return
+            except OperationalError as exc:
+                self._log.warning(
+                    "usaspending_subawards_db_connection_abort",
+                    attempt=attempt,
+                    batch_size=len(batch_raw_records),
+                    error=str(exc),
+                )
+                self.session.rollback()
+                if attempt >= self.max_retries:
+                    raise ConnectorError(
+                        f"DB commit failed after {self.max_retries + 1} attempts: {exc}"
+                    ) from exc
+                delay = min(self.backoff_base * (2**attempt), self.backoff_max)
+                time.sleep(delay)
+                self._log.info(
+                    "usaspending_subawards_reprocessing_batch_after_reconnect",
+                    records=len(batch_raw_records),
+                )
+                for raw in batch_raw_records:
+                    self._process_record(raw)
 
     def _fetch_page(self, client: httpx.Client, page: int) -> tuple[list[dict], bool]:
-        # Sort by amount desc rather than id desc.
-        # id desc retrieves the most recently reported records first,
-        # which are currently dominated by CCDBG childcare subgrants
-        # (a large batch uploaded recently). amount desc skips that noise
-        # and surfaces the $1M-$30M manufacturing/defense/staffing
-        # subcontracts where Porter's ICP is concentrated.
-        # The $1B Pydantic cap silently absorbs the corrupted
-        # trillion-dollar rows at pages 1-N before real data appears.
+        # Sort by id desc (most recently reported records first).
+        # amount desc was tried per the July 2026 fix, but the sort surfaces
+        # the API's corrupted rows first (e.g. $39-trillion "amount" values) —
+        # every one of them fails the $10K-$50M validator, so pages of
+        # quarantines happen before any real data appears (verified: page 1
+        # amount-desc top 10 are all >$50B, all corrupted). Now that noise
+        # keywords soft-flag instead of hard-block, the original reason for
+        # avoiding id desc (CCDBG childcare batch domination) no longer
+        # applies, so id desc is safe again.
         body = {
             "filters": {},
             "limit": self.page_limit,
             "page": page,
-            "sort": "amount",
+            "sort": "id",
             "order": "desc",
         }
         last_exc: Exception | None = None
