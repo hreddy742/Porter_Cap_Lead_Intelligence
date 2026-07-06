@@ -344,14 +344,16 @@ def test_page_limit_env_var_sent_in_request():
     assert sent_body["limit"] == 10
 
 
-# ─── Test 10: sort by amount desc in request body ────────────────────────────
+# ─── Test 10: sort by id desc in request body ────────────────────────────────
 
 
-def test_sort_by_amount_desc_in_request_body():
+def test_sort_by_id_desc_in_request_body():
     """
-    The connector must sort by 'amount' descending.
-    id desc surfaced CCDBG childcare batches (99%+ noise at the top).
-    amount desc targets the $1M-$30M manufacturing/defense/staffing window.
+    The connector must sort by 'id' descending (most recent first).
+    amount desc was tried but surfaces the API's corrupted rows (e.g.
+    $39-trillion amounts) first, which fail the $10K-$50M validator on
+    every early page. Noise keywords now soft-flag instead of hard-block,
+    so id desc no longer risks CCDBG batch domination the way it used to.
     """
     pages = [_mock_response([_subaward(1)], has_next=False)]
 
@@ -359,7 +361,7 @@ def test_sort_by_amount_desc_in_request_body():
 
     call_kwargs = mock_client.post.call_args
     sent_body = call_kwargs.kwargs.get("json") or call_kwargs.args[1]
-    assert sent_body.get("sort") == "amount", "must sort by amount, not id or action_date"
+    assert sent_body.get("sort") == "id", "must sort by id, not amount or action_date"
     assert sent_body.get("order") == "desc"
 
 
