@@ -25,15 +25,6 @@ Write-Host ""
 $env:SBA_LOANS_ENABLED = "true"
 $env:SBA_LOANS_TEST_LIMIT = "0"
 
-# Step 0 - Database backup
-Write-Step "Step 0 - Backing up database"
-python scripts/backup_db.py
-if ($LASTEXITCODE -eq 0) {
-    Write-Ok "Database backed up"
-} else {
-    Write-Warn "Backup failed - continuing anyway"
-}
-
 # Step 1 - Docker Desktop
 Write-Step "Step 1 - Checking Docker Desktop"
 $docker = Get-Process "Docker Desktop" -ErrorAction SilentlyContinue
@@ -64,6 +55,15 @@ while (-not $ready -and $waited -lt 30) {
     }
 }
 Write-Ok "Database is ready"
+
+# Step 0 - Database backup
+Write-Step "Step 0 - Backing up database"
+python scripts/backup_db.py
+if ($LASTEXITCODE -eq 0) {
+    Write-Ok "Database backed up"
+} else {
+    Write-Warn "Backup failed - continuing anyway"
+}
 
 # Step 3 - Migrations
 Write-Step "Step 3 - Running database migrations"
