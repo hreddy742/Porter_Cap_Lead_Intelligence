@@ -12,14 +12,15 @@ backup_file = BACKUP_DIR / f"porter_leads_{today}.sql"
 result = subprocess.run([
     "docker", "exec", "porter-leads-db-1",
     "pg_dump", "-U", "porter", "porter_leads"
-], capture_output=True, text=True)
+], capture_output=True)
 
 if result.returncode == 0:
-    backup_file.write_text(result.stdout)
+    backup_file.write_bytes(result.stdout)
     print(f"Backup saved: {backup_file}")
     print(f"Size: {backup_file.stat().st_size / 1024 / 1024:.1f} MB")
 else:
-    print(f"Backup FAILED: {result.stderr}")
+    error = result.stderr.decode('utf-8', errors='replace')
+    print(f"Backup FAILED: {error}")
     exit(1)
 
 cutoff = datetime.now() - timedelta(days=7)
