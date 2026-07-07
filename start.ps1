@@ -23,7 +23,6 @@ Write-Host ""
 # the same way even before the DB flag lookup, without depending on prior
 # terminal state.
 $env:SBA_LOANS_ENABLED = "true"
-$env:SBA_LOANS_TEST_LIMIT = "0"
 
 # Step 1 - Docker Desktop
 Write-Step "Step 1 - Checking Docker Desktop"
@@ -69,6 +68,40 @@ if ($LASTEXITCODE -eq 0) {
 Write-Step "Step 3 - Running database migrations"
 python -m alembic upgrade head 2>&1 | Out-Null
 Write-Ok "Migrations up to date"
+
+# ================================================
+# DAILY PIPELINE LIMITS
+# These control how much each source processes
+# per run. Keeps daily runs to 30-60 minutes.
+# Set to 0 for a full rebuild (run overnight).
+#
+# To run a full rebuild (processes all data):
+#   $env:SBA_LOANS_TEST_LIMIT = "0"
+#   $env:SBIR_TEST_LIMIT = "0"
+#   $env:USASPENDING_MAX_PAGES = "0"
+#   .\start.ps1
+# ================================================
+
+# USASpending: 5 pages = ~500 new contracts
+if (-not $env:USASPENDING_MAX_PAGES) {
+    $env:USASPENDING_MAX_PAGES = "5"
+}
+
+# SBA: 5000 rows per run
+# Full dataset processes across ~6 daily runs
+if (-not $env:SBA_LOANS_TEST_LIMIT) {
+    $env:SBA_LOANS_TEST_LIMIT = "5000"
+}
+
+# SBIR: 2000 rows per run
+if (-not $env:SBIR_TEST_LIMIT) {
+    $env:SBIR_TEST_LIMIT = "2000"
+}
+
+# Enable all sources
+$env:SBA_LOANS_ENABLED = "true"
+$env:SBIR_BULK_ENABLED = "true"
+$env:SBIR_API_ENABLED = "true"
 
 # Step 4 - FastAPI backend
 Write-Step "Step 4 - Starting FastAPI backend on port 8000"
