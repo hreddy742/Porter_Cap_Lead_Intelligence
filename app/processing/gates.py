@@ -135,6 +135,86 @@ def gate_11_ofac_screening(company_name: str) -> OFACResult:
     return OFACResult(passed=True)
 
 
+class AcademicResult(NamedTuple):
+    passed: bool
+    reason: str | None = None
+
+
+# Multi-word phrases that unambiguously identify an academic institution
+# wherever they appear in the name. Bare single words like "college" or
+# "university" are deliberately excluded here — "COLLEGE PARK SYSTEMS INC"
+# and "UNIVERSITY SERVICES LLC" are real, non-academic company names, so a
+# blanket substring match on those words would misclassify legitimate leads.
+_ACADEMIC_NAME_KEYWORDS = frozenset({
+    "univeristy",  # common typo — always academic if present
+    "university of",
+    "college of",
+    "univ of",
+    "institute of technology",
+    "polytechnic institute",
+    "school of medicine",
+    "school of public health",
+    "school of nursing",
+    "medical school",
+    "health sciences",
+    "community college",
+    "graduate school",
+    "theological seminary",
+    "divinity school",
+    "seminary",
+})
+
+# "university"/"college"/etc. as the last word of the name is unambiguous
+# ("VANDERBILT UNIVERSITY", "BOSTON UNIVERSITY").
+_ACADEMIC_NAME_SUFFIXES = ("university", "college", "institute", "academy", "seminary")
+
+# Research institutes named "<Name> Institute for ... Studies" are degree-granting
+# academic bodies (e.g. Salk Institute for Biological Studies), distinct from
+# non-academic policy institutes like "Institute for Defense Analyses".
+_INSTITUTE_STUDIES_PATTERN = re.compile(r"\binstitute\b.*\bstudies\b")
+
+
+def gate_12_academic_institution(company_name: str) -> AcademicResult:
+    """
+    Gate 12 — Academic Institution Hard Block.
+
+    Universities, colleges, and medical/theological schools cannot be Porter
+    Capital factoring clients (they may still be the debtor on an invoice,
+    just never the client submitting invoices).
+
+    Returns FAIL if company_name matches an academic-institution keyword, suffix,
+    or the "institute ... studies" research-institute pattern.
+    Ambiguous names (e.g. "Institute for Defense Analyses") default to PASS —
+    a human reviewer can always reject manually via the review UI.
+    Confirmed by John Cox Miller — Porter Capital compliance requirement, July 7 2026.
+    """
+    if not company_name:
+        return AcademicResult(passed=True)
+
+    name_lower = company_name.lower().strip()
+
+    for keyword in _ACADEMIC_NAME_KEYWORDS:
+        if keyword in name_lower:
+            return AcademicResult(
+                passed=False, reason=f"Academic institution: {company_name}"
+            )
+
+    for suffix in _ACADEMIC_NAME_SUFFIXES:
+        if name_lower.endswith(suffix):
+            return AcademicResult(
+                passed=False,
+                reason=f"Academic institution suffix: {company_name}",
+            )
+
+    if _INSTITUTE_STUDIES_PATTERN.search(name_lower):
+        return AcademicResult(
+            passed=False,
+            reason=f"Academic research institute: {company_name}",
+        )
+
+    return AcademicResult(passed=True)
+
+
 # Prefixes for the soft-flag (Phase 2B ICP policy, confirmed by John Cox Miller June 24 2026).
 # Leads in these sectors are scored and stored normally but hidden from sales by default.
 _EXCLUDED_NAICS_PREFIXES: frozenset[str] = frozenset({
@@ -338,6 +418,23 @@ def evaluate_mandatory_gates(company_id: UUID, db: Session) -> dict:
             "passed": False,
             "gate_name": "ofac_sdn_match",
             "gate_reason": ofac.reason or "ofac_sdn_match",
+            "route": "hard_block",
+            "should_score": False,
+            "suppression": suppression,
+        }
+
+    # Gate 12 — academic institution screening (hard block)
+    academic = gate_12_academic_institution(company.canonical_name)
+    if not academic.passed:
+        logger.warning(
+            "gate_12_academic_institution",
+            company=company.canonical_name,
+            reason=academic.reason,
+        )
+        return {
+            "passed": False,
+            "gate_name": "academic_institution",
+            "gate_reason": academic.reason or "academic_institution",
             "route": "hard_block",
             "should_score": False,
             "suppression": suppression,
