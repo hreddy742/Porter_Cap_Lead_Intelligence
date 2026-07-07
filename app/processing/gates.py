@@ -215,6 +215,69 @@ def gate_12_academic_institution(company_name: str) -> AcademicResult:
     return AcademicResult(passed=True)
 
 
+class SocialServiceResult(NamedTuple):
+    passed: bool
+    reason: str | None = None
+
+
+# NAICS codes for pure social-service / human-services nonprofits. These entities
+# receive donations and grants, not commercial invoices — they are never a factoring
+# client, only ever (at most) a debtor on someone else's invoice.
+_SOCIAL_SERVICE_NAICS = frozenset({
+    "624110",  # Child and youth services
+    "624120",  # Services for elderly/disabled
+    "624190",  # Other individual/family services
+    "624210",  # Community food services
+    "624221",  # Temporary shelters (domestic violence)
+    "624229",  # Other community housing
+    "624230",  # Emergency relief services
+    "624310",  # Vocational rehab services
+    "624410",  # Child day care services
+})
+
+_SOCIAL_SERVICE_KEYWORDS = frozenset({
+    "battered women",
+    "domestic violence",
+    "homeless shelter",
+    "food bank",
+    "soup kitchen",
+    "community action",
+    "human services",
+    "social services",
+})
+
+
+def gate_13_social_service_nonprofit(
+    company_name: str, naics_code: str | None
+) -> SocialServiceResult:
+    """
+    Gate 13 — Social Service Nonprofit Hard Block.
+
+    Pure social-service / human-services nonprofits (shelters, food banks, child
+    day care, community action agencies) are never Porter ICP — they do not
+    generate commercial invoices to factor. Hard block, same as Gate 12.
+
+    Returns FAIL if naics_code is in _SOCIAL_SERVICE_NAICS or company_name
+    contains a _SOCIAL_SERVICE_KEYWORDS phrase.
+    Confirmed by John Cox Miller — Porter Capital compliance requirement, July 2026.
+    """
+    if naics_code and naics_code[:6] in _SOCIAL_SERVICE_NAICS:
+        return SocialServiceResult(
+            passed=False,
+            reason=f"Social service nonprofit NAICS {naics_code}: {company_name}",
+        )
+
+    name_lower = (company_name or "").lower().strip()
+    for keyword in _SOCIAL_SERVICE_KEYWORDS:
+        if keyword in name_lower:
+            return SocialServiceResult(
+                passed=False,
+                reason=f"Social service nonprofit keyword '{keyword}': {company_name}",
+            )
+
+    return SocialServiceResult(passed=True)
+
+
 # Prefixes for the soft-flag (Phase 2B ICP policy, confirmed by John Cox Miller June 24 2026).
 # Leads in these sectors are scored and stored normally but hidden from sales by default.
 _EXCLUDED_NAICS_PREFIXES: frozenset[str] = frozenset({
@@ -435,6 +498,25 @@ def evaluate_mandatory_gates(company_id: UUID, db: Session) -> dict:
             "passed": False,
             "gate_name": "academic_institution",
             "gate_reason": academic.reason or "academic_institution",
+            "route": "hard_block",
+            "should_score": False,
+            "suppression": suppression,
+        }
+
+    # Gate 13 — social service nonprofit screening (hard block)
+    social_service = gate_13_social_service_nonprofit(
+        company.canonical_name, company.naics_code
+    )
+    if not social_service.passed:
+        logger.warning(
+            "gate_13_social_service_nonprofit",
+            company=company.canonical_name,
+            reason=social_service.reason,
+        )
+        return {
+            "passed": False,
+            "gate_name": "social_service_nonprofit",
+            "gate_reason": social_service.reason or "social_service_nonprofit",
             "route": "hard_block",
             "should_score": False,
             "suppression": suppression,
