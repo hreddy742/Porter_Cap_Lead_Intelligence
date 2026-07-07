@@ -147,21 +147,28 @@ def classify_award_type(award_type_code: str | None) -> str:
     return "CONTRACT_AWARD"
 
 
-def _is_active_award(
-    award_date: date,
-    pop_end_date: date | None,
-    lookback_years: int,
-) -> bool:
-    """True if the project is still running or the award is recent.
+def _is_active_award(award_date: date, lookback_years: int) -> bool:
+    """True if the award was made within the lookback window.
 
-    Include if EITHER the period of performance end date is in the future
-    (project still active) OR the award was made within the lookback window
-    (recent award, likely still relevant). Fixed per John Cox Miller, Porter
-    Capital, July 2026.
+    Lookback-only. This connector cannot check whether the project is still
+    running: it deliberately calls spending_by_transaction (not
+    spending_by_award) so naics_code/naics_description are populated for
+    scoring, but spending_by_transaction's fields allowlist has no period-of-
+    performance-end-date field under any name — confirmed live 2026-07-07 by
+    requesting "Period of Performance Current End Date",
+    "period_of_performance_current_end_date", "Contract End Date", and
+    "End Date", all rejected with HTTP 400
+    ("Field 'fields' is outside valid values [...]"). "End Date" does work on
+    spending_by_award, but switching endpoints would reintroduce null NAICS
+    for most DoD contracts (see module docstring). A prior attempt requested
+    "Period of Performance Current End Date" anyway, which the API rejected
+    outright (HTTP 400 on every prime-award pull) — fixed in commit 1bb6140
+    by dropping the field, which silently disabled the "still active" half of
+    this check instead of documenting the endpoint limitation. Known gap:
+    prime-award contracts with period-of-performance end dates further out
+    than `lookback_years` are excluded even though they're still active.
     """
     today = date.today()
-    if pop_end_date is not None and pop_end_date >= today:
-        return True
     cutoff = today - timedelta(days=365 * lookback_years)
     return award_date >= cutoff
 
@@ -207,9 +214,6 @@ class USASpendingRecord(BaseModel):
     action_type: str | None = Field(None, alias="Action Type")
     action_type_description: str | None = Field(None, alias="Action Type Description")
     award_type: str | None = Field(None, alias="Award Type")
-    period_of_performance_current_end_date: date | None = Field(
-        None, alias="Period of Performance Current End Date"
-    )
 
     @field_validator("award_id", mode="before")
     @classmethod
@@ -253,20 +257,6 @@ class USASpendingRecord(BaseModel):
             except ValueError:
                 raise ValueError(f"award_date must be an ISO date string, got {v!r}")
         raise ValueError(f"award_date expected str or date, got {type(v).__name__}")
-
-    @field_validator("period_of_performance_current_end_date", mode="before")
-    @classmethod
-    def parse_pop_end_date(cls, v: object) -> date | None:
-        if v is None or v == "":
-            return None
-        if isinstance(v, date):
-            return v
-        if isinstance(v, str):
-            try:
-                return date.fromisoformat(v)
-            except ValueError:
-                return None
-        return None
 
     @field_validator("recipient_uei", mode="before")
     @classmethod
@@ -469,17 +459,12 @@ class USASpendingConnector:
             )
             return
 
-        if not _is_active_award(
-            record.award_date,
-            record.period_of_performance_current_end_date,
-            self.lookback_years,
-        ):
+        if not _is_active_award(record.award_date, self.lookback_years):
             self.source_run.records_skipped += 1
             self._log.info(
                 "usaspending_record_not_active_skip",
                 award_id=record.award_id,
                 award_date=str(record.award_date),
-                pop_end_date=str(record.period_of_performance_current_end_date),
             )
             return
 

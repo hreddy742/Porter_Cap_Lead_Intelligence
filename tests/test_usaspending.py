@@ -766,31 +766,35 @@ def test_amount_at_minimum_accepted():
 # ─── Test 26: activeness-based date filter ────────────────────────────────────
 
 
-def test_active_project_future_pop_end_date_included():
+def test_old_award_excluded_even_with_pop_end_date_field_present():
     """
-    An old action_date but a period_of_performance_current_end_date in the
-    future must still be included — the project is still running.
+    spending_by_transaction (the endpoint this connector uses for NAICS data)
+    has no period-of-performance-end-date field under any name — confirmed
+    live 2026-07-07 against the real API, which rejects it with HTTP 400. A
+    "Period of Performance Current End Date" key in the raw payload is
+    therefore just ignored by USASpendingRecord (extra fields are dropped),
+    and activeness is lookback-only: an old action_date is excluded even if
+    the raw payload happens to carry a future end-date-shaped key.
     """
-    old_but_active = _award(1)
-    old_but_active["Action Date"] = "2019-01-01"
-    old_but_active["Period of Performance Current End Date"] = "2099-01-01"
-    pages = [_mock_response([old_but_active], has_next=False)]
+    old_but_would_have_been_active = _award(1)
+    old_but_would_have_been_active["Action Date"] = "2019-01-01"
+    old_but_would_have_been_active["Period of Performance Current End Date"] = "2099-01-01"
+    pages = [_mock_response([old_but_would_have_been_active], has_next=False)]
 
     source_run, _session, _client = _run_connector(responses=pages)
 
-    assert source_run.records_valid == 1
-    assert source_run.records_skipped == 0
+    assert source_run.records_valid == 0
+    assert source_run.records_skipped == 1
 
 
 def test_expired_and_old_award_excluded():
     """
-    An award with no future period-of-performance end date and an action_date
-    older than the lookback window must be skipped (records_skipped, not
-    quarantined — it passed validation, it's just not active/recent).
+    An award with an action_date older than the lookback window must be
+    skipped (records_skipped, not quarantined — it passed validation, it's
+    just not recent).
     """
     stale = _award(1)
     stale["Action Date"] = "2015-01-01"
-    stale["Period of Performance Current End Date"] = "2015-06-01"
     pages = [_mock_response([stale], has_next=False)]
 
     source_run, _session, _client = _run_connector(responses=pages)
@@ -799,12 +803,9 @@ def test_expired_and_old_award_excluded():
     assert source_run.records_skipped == 1
 
 
-def test_recent_award_without_pop_end_date_included():
-    """
-    An award within the lookback window with no period-of-performance end
-    date at all must still be included via the recency branch.
-    """
-    recent = _award(1)  # Action Date 2025-03-15, no pop end date field
+def test_recent_award_included():
+    """An award within the lookback window is included."""
+    recent = _award(1)  # Action Date 2025-03-15
     pages = [_mock_response([recent], has_next=False)]
 
     source_run, _session, _client = _run_connector(responses=pages)
