@@ -64,6 +64,14 @@ logger = structlog.get_logger(__name__)
 
 # ─── Constants ────────────────────────────────────────────────────────────────
 
+# Confirmed dead as of 2026-07-08 (returns 404; CKAN resource_show for this
+# ID also 404s, so the resource was actually removed, not just relinked).
+# As of that date the "7-a-504-foia" dataset on data.sba.gov has ZERO CSV
+# resources — only the data dictionary XLSX remains listed. No replacement
+# URL exists yet to swap in. Re-check data.sba.gov/en/dataset/7-a-504-foia
+# periodically; the portal has reorganized this URL before (see build notes
+# in CLAUDE.md). Until SBA republishes, _ensure_cache() falls back to the
+# existing stale local cache rather than failing the run.
 _DOWNLOAD_URL = (
     "https://data.sba.gov/en/dataset/0ff8e8e9-b967-4f4e-987c-6ac78c575087/"
     "resource/d67d3ccb-2002-4134-a288-481b51cd3479/download/"
@@ -371,12 +379,30 @@ def _download_csv(log: structlog.BoundLogger) -> None:
 
 
 def _ensure_cache(log: structlog.BoundLogger) -> Path:
-    """Return path to a valid (fresh or just-downloaded) cache file."""
+    """Return path to a valid (fresh or just-downloaded) cache file.
+
+    If the remote download 404s (the SBA portal has reorganized resource
+    URLs before — see _DOWNLOAD_URL comment) and a stale cache already
+    exists, serve the stale cache instead of failing the run. A source
+    with no cache at all still raises, since there is nothing to serve.
+    """
     path = _get_cache_path()
     if _cache_is_fresh(path):
         log.info("sba_cache_hit", cache=str(path))
         return path
-    _download_csv(log)
+    try:
+        _download_csv(log)
+    except httpx.HTTPStatusError as exc:
+        if not path.exists():
+            raise
+        age_days = (time.time() - path.stat().st_mtime) / 86400
+        log.warning(
+            "sba_url_gone_using_stale_cache",
+            url=_DOWNLOAD_URL,
+            status_code=exc.response.status_code,
+            cache=str(path),
+            cache_age_days=round(age_days, 1),
+        )
     return path
 
 

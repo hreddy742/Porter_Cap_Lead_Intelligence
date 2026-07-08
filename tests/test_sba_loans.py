@@ -15,6 +15,8 @@ Coverage:
 
 from __future__ import annotations
 
+import os
+import time
 import uuid
 from datetime import date
 from decimal import Decimal
@@ -22,6 +24,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 from pydantic import ValidationError
+
+import httpx
 
 from app.pipeline.connectors.sba_loans import (
     SBALoanRecord,
@@ -31,6 +35,7 @@ from app.pipeline.connectors.sba_loans import (
     _has_noise_keyword,
     _signal_type_for_status,
     _is_active_loan,
+    _ensure_cache,
     _SBA_INCLUDED_NAICS_PREFIXES,
     _SBA_EXCLUDED_NAICS_PREFIXES,
     _SBA_NOISE_KEYWORDS,
@@ -886,6 +891,43 @@ def test_test_limit_stops_processing_early():
     rows = [_valid_row(borrname=f"Company {i}") for i in range(5)]
     source_run, _ = _run_connector(rows, env={"SBA_LOANS_TEST_LIMIT": "2"})
     assert source_run.records_fetched == 2
+
+
+# ─── Stale-cache fallback when the remote download 404s ──────────────────────
+
+
+def _write_stale_cache(tmp_path, age_days: int = 40):
+    cache = tmp_path / "sba_loans_cache.csv"
+    cache.write_text("borrname,borrstate,grossapproval,approvaldate,loanstatus\n")
+    stale_mtime = time.time() - age_days * 86400
+    os.utime(cache, (stale_mtime, stale_mtime))
+    return cache
+
+
+def test_ensure_cache_falls_back_to_stale_cache_on_404(tmp_path, monkeypatch):
+    """A 404 on download must not fail the run if a stale cache is available."""
+    cache = _write_stale_cache(tmp_path)
+    monkeypatch.setenv("SBA_CACHE_PATH", str(cache))
+
+    response = MagicMock(status_code=404)
+    error = httpx.HTTPStatusError("404", request=MagicMock(), response=response)
+    with patch("app.pipeline.connectors.sba_loans._download_csv", side_effect=error):
+        result = _ensure_cache(MagicMock())
+
+    assert result == cache
+    assert cache.exists()
+
+
+def test_ensure_cache_raises_when_no_cache_and_download_fails(tmp_path, monkeypatch):
+    """A 404 with no existing cache at all must still raise — nothing to serve."""
+    missing_cache = tmp_path / "does_not_exist.csv"
+    monkeypatch.setenv("SBA_CACHE_PATH", str(missing_cache))
+
+    response = MagicMock(status_code=404)
+    error = httpx.HTTPStatusError("404", request=MagicMock(), response=response)
+    with patch("app.pipeline.connectors.sba_loans._download_csv", side_effect=error):
+        with pytest.raises(httpx.HTTPStatusError):
+            _ensure_cache(MagicMock())
 
 
 # ─── Status completes cleanly on empty CSV ───────────────────────────────────
