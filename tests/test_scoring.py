@@ -180,7 +180,7 @@ def test_gates_called_first_and_early_exit_when_blocked(mock_gates):
 
     result = score_company(company_id, db)
 
-    mock_gates.assert_called_once_with(company_id, db)
+    mock_gates.assert_called_once_with(company_id, db, ofac_cache=None, ofac_stats=None)
     assert result["scored"] is False
     # No execute calls should happen after early exit.
     assert db.execute.call_count == 0

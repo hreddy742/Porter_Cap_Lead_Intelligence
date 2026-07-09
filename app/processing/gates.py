@@ -93,7 +93,11 @@ def _load_ofac_sdn() -> frozenset[str]:
         return frozenset()
 
 
-def gate_11_ofac_screening(company_name: str) -> OFACResult:
+def gate_11_ofac_screening(
+    company_name: str,
+    cache: dict[str, OFACResult] | None = None,
+    stats: dict[str, int] | None = None,
+) -> OFACResult:
     """
     Gate 11 — OFAC SDN Screening (hard block).
 
@@ -104,10 +108,38 @@ def gate_11_ofac_screening(company_name: str) -> OFACResult:
     Returns FAIL if match found (exact or partial ≥ 8 chars).
     Returns PASS with is_warning=True if SDN file not found (gate disabled).
     Confirmed by John Cox Miller — Porter Capital compliance requirement, June 2026.
+
+    `cache` is an optional dict the caller scopes to a single pipeline run —
+    the same company name recurs across sources (SBA loan + USASpending award,
+    etc.) and each check is O(23K) string comparisons, so a run-scoped cache
+    avoids repeating that work for repeat names. The OFAC SDN list itself
+    refreshes weekly, so this cache must never persist across runs (caller's
+    responsibility — this function never creates or clears it on its own).
+    `stats`, if provided, gets "hits"/"misses" counters incremented for
+    end-of-run cache metrics logging.
     """
     if not company_name:
         return OFACResult(passed=True)
 
+    cache_key = _normalize_ofac_name(company_name) if cache is not None else None
+    if cache is not None and cache_key in cache:
+        if stats is not None:
+            stats["hits"] = stats.get("hits", 0) + 1
+        logger.debug("ofac_cache_hit", company=company_name)
+        return cache[cache_key]
+
+    result = _run_full_ofac_check(company_name)
+
+    if cache is not None:
+        cache[cache_key] = result
+        if stats is not None:
+            stats["misses"] = stats.get("misses", 0) + 1
+        logger.debug("ofac_cache_miss", company=company_name, passed=result.passed)
+
+    return result
+
+
+def _run_full_ofac_check(company_name: str) -> OFACResult:
     ofac_names = _load_ofac_sdn()
 
     if not ofac_names:
@@ -347,7 +379,12 @@ def _is_excluded_industry(company: Company) -> bool:
     return any(kw in industry for kw in _EXCLUDED_INDUSTRY_KEYWORDS)
 
 
-def evaluate_mandatory_gates(company_id: UUID, db: Session) -> dict:
+def evaluate_mandatory_gates(
+    company_id: UUID,
+    db: Session,
+    ofac_cache: dict[str, OFACResult] | None = None,
+    ofac_stats: dict[str, int] | None = None,
+) -> dict:
     """
     Run all mandatory gates for company_id.
 
@@ -360,6 +397,9 @@ def evaluate_mandatory_gates(company_id: UUID, db: Session) -> dict:
         suppression   dict | None  — raw check_suppression result (None for pre-suppression gates)
 
     Gates run in order; first failure wins.
+
+    `ofac_cache`, if provided, is passed through to gate_11_ofac_screening —
+    see that function's docstring for scoping requirements.
     """
     company: Company | None = db.get(Company, company_id)
     if company is None:
@@ -470,7 +510,7 @@ def evaluate_mandatory_gates(company_id: UUID, db: Session) -> dict:
         return _gated("award_amount_too_small", "archive")
 
     # Gate 11 — OFAC SDN screening (hard block)
-    ofac = gate_11_ofac_screening(company.canonical_name)
+    ofac = gate_11_ofac_screening(company.canonical_name, cache=ofac_cache, stats=ofac_stats)
     if not ofac.passed:
         logger.warning(
             "gate_11_ofac_match",

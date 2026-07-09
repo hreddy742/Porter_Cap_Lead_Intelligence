@@ -236,3 +236,63 @@ class TestOFACResultStructure:
         assert result.passed is False
         assert result.reason is not None
         assert len(result.reason) > 0
+
+
+# ── per-run cache ──────────────────────────────────────────────────────────────
+
+class TestOfacCache:
+    def test_cache_hit_skips_full_check(self):
+        cache: dict = {}
+        with _patch_sdn(_KNOWN_SDN_NAMES), \
+             patch(
+                 "app.processing.gates._run_full_ofac_check",
+                 side_effect=lambda name: OFACResult(passed=True),
+             ) as mock_check:
+            first = gate_11_ofac_screening("CAPITAL BRAND GROUP LLC", cache=cache)
+            second = gate_11_ofac_screening("CAPITAL BRAND GROUP LLC", cache=cache)
+
+        assert mock_check.call_count == 1, "second call with same name+cache must not re-run the full check"
+        assert first == second
+
+    def test_cache_miss_for_new_name(self):
+        cache: dict = {}
+        with _patch_sdn(_KNOWN_SDN_NAMES), \
+             patch(
+                 "app.processing.gates._run_full_ofac_check",
+                 side_effect=lambda name: OFACResult(passed=True),
+             ) as mock_check:
+            gate_11_ofac_screening("CAPITAL BRAND GROUP LLC", cache=cache)
+            gate_11_ofac_screening("VETERAN TECHNOLOGY PARTNERS LLC", cache=cache)
+
+        assert mock_check.call_count == 2, "distinct names must each run the full check once"
+
+    def test_cache_scoped_to_run_not_shared(self):
+        with _patch_sdn(_KNOWN_SDN_NAMES), \
+             patch(
+                 "app.processing.gates._run_full_ofac_check",
+                 side_effect=lambda name: OFACResult(passed=True),
+             ) as mock_check:
+            cache_run_1: dict = {}
+            gate_11_ofac_screening("CAPITAL BRAND GROUP LLC", cache=cache_run_1)
+
+            cache_run_2: dict = {}
+            gate_11_ofac_screening("CAPITAL BRAND GROUP LLC", cache=cache_run_2)
+
+        assert mock_check.call_count == 2, (
+            "a fresh cache dict (new pipeline run) must not reuse another run's cached result"
+        )
+
+    def test_cache_none_behaves_as_before(self):
+        with _patch_sdn(_KNOWN_SDN_NAMES):
+            result = gate_11_ofac_screening("BANCO NACIONAL DE CUBA", cache=None)
+        assert result.passed is False
+
+    def test_cache_records_hit_and_miss_stats(self):
+        cache: dict = {}
+        stats = {"hits": 0, "misses": 0}
+        with _patch_sdn(_KNOWN_SDN_NAMES):
+            gate_11_ofac_screening("CAPITAL BRAND GROUP LLC", cache=cache, stats=stats)
+            gate_11_ofac_screening("CAPITAL BRAND GROUP LLC", cache=cache, stats=stats)
+            gate_11_ofac_screening("VETERAN TECHNOLOGY PARTNERS LLC", cache=cache, stats=stats)
+
+        assert stats == {"hits": 1, "misses": 2}

@@ -155,9 +155,18 @@ def _uuids_to_strings(ids: list[UUID]) -> list[str]:
 # ─── Main entry point ─────────────────────────────────────────────────────────
 
 
-def score_company(company_id: UUID, db: Session) -> dict:
+def score_company(
+    company_id: UUID,
+    db: Session,
+    ofac_cache: dict | None = None,
+    ofac_stats: dict | None = None,
+) -> dict:
     """
     Score a company through mandatory gates then six scoring components.
+
+    `ofac_cache`/`ofac_stats`, if provided, are scoped to a single pipeline
+    run and passed through to evaluate_mandatory_gates() / gate_11_ofac_screening()
+    to skip redundant OFAC SDN comparisons for repeat company names.
 
     Returns a dict:
         scored              bool
@@ -175,7 +184,9 @@ def score_company(company_id: UUID, db: Session) -> dict:
     No side effects for scored=False (gated companies).
     """
     # ── Step 1: mandatory gates — founding rule 4 ─────────────────────────────
-    gate_result = evaluate_mandatory_gates(company_id, db)
+    gate_result = evaluate_mandatory_gates(
+        company_id, db, ofac_cache=ofac_cache, ofac_stats=ofac_stats
+    )
     if not gate_result["should_score"]:
         return {
             "scored": False,

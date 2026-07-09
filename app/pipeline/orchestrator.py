@@ -127,7 +127,13 @@ def _new_batch_summary() -> dict:
     }
 
 
-def _process_raw_event(raw_event: RawSourceEvent, db: Session, batch_summary: dict) -> None:
+def _process_raw_event(
+    raw_event: RawSourceEvent,
+    db: Session,
+    batch_summary: dict,
+    ofac_cache: dict | None = None,
+    ofac_stats: dict | None = None,
+) -> None:
     evidence_items = extract_evidence(raw_event.id, db)
     batch_summary["evidence_items_created"] += len(evidence_items)
 
@@ -139,7 +145,7 @@ def _process_raw_event(raw_event: RawSourceEvent, db: Session, batch_summary: di
         batch_summary["companies_resolved"] += 1
         signals = detect_signals_for_evidence(evidence.id, db)
         batch_summary["signals_created"] += len(signals)
-        score_result = score_company(company.id, db)
+        score_result = score_company(company.id, db, ofac_cache=ofac_cache, ofac_stats=ofac_stats)
         if score_result["scored"]:
             batch_summary["companies_scored"] += 1
             tier = score_result.get("tier")
@@ -157,6 +163,8 @@ def _commit_batch(
     db: Session,
     log: structlog.BoundLogger,
     batch_raw_events: list[RawSourceEvent],
+    ofac_cache: dict | None = None,
+    ofac_stats: dict | None = None,
 ) -> dict:
     """
     Process and commit one batch of raw events. On a dropped connection
@@ -168,7 +176,7 @@ def _commit_batch(
     for attempt in range(MAX_RETRIES + 1):
         batch_summary = _new_batch_summary()
         for raw_event in batch_raw_events:
-            _process_raw_event(raw_event, db, batch_summary)
+            _process_raw_event(raw_event, db, batch_summary, ofac_cache, ofac_stats)
         try:
             db.commit()
             return batch_summary
@@ -212,6 +220,8 @@ def _execute_source(
     source_run: SourceRun,
     db: Session,
     summary: dict,
+    ofac_cache: dict | None = None,
+    ofac_stats: dict | None = None,
 ) -> None:
     """
     Run one source end-to-end: connector → evidence → resolution → signals → scoring.
@@ -263,11 +273,11 @@ def _execute_source(
             if i % 1000 == 0:
                 log.info("orchestrator_events_progress", processed=i, total=len(raw_events))
             if len(pending_batch) >= BATCH_COMMIT_SIZE:
-                batch_summary = _commit_batch(db, log, pending_batch)
+                batch_summary = _commit_batch(db, log, pending_batch, ofac_cache, ofac_stats)
                 _merge_batch_summary(summary, batch_summary, len(pending_batch))
                 pending_batch = []
         if pending_batch:
-            batch_summary = _commit_batch(db, log, pending_batch)
+            batch_summary = _commit_batch(db, log, pending_batch, ofac_cache, ofac_stats)
             _merge_batch_summary(summary, batch_summary, len(pending_batch))
 
         # ── Step 4: mark source completed ─────────────────────────────────────
@@ -340,6 +350,12 @@ def run_pipeline(db: Session) -> dict:
 
     sources = _load_enabled_sources(db)
 
+    # In-memory only, scoped to this single pipeline run — never persisted to
+    # DB/disk and never reused across runs (the OFAC SDN list refreshes weekly,
+    # so a stale cross-run cache could miss newly added names).
+    ofac_cache: dict = {}
+    ofac_stats: dict = {"hits": 0, "misses": 0}
+
     summary: dict = {
         "pipeline_run_id": pipeline_run.id,
         "status": "running",
@@ -370,7 +386,7 @@ def run_pipeline(db: Session) -> dict:
         db.flush()
         db.commit()
 
-        _execute_source(source, source_run, db, summary)
+        _execute_source(source, source_run, db, summary, ofac_cache, ofac_stats)
         summary["quarantine_count"] += source_run.quarantine_count or 0
 
     # ── Determine final pipeline status ───────────────────────────────────────
@@ -394,6 +410,15 @@ def run_pipeline(db: Session) -> dict:
 
     summary["status"] = final_status
     db.commit()
+
+    total_ofac_checks = ofac_stats["hits"] + ofac_stats["misses"]
+    log.info(
+        "ofac_cache_stats",
+        total_checks=total_ofac_checks,
+        cache_hits=ofac_stats["hits"],
+        cache_misses=ofac_stats["misses"],
+        hit_rate=(ofac_stats["hits"] / total_ofac_checks) if total_ofac_checks > 0 else 0,
+    )
 
     log.info("orchestrator_pipeline_finished", status=final_status)
     return summary

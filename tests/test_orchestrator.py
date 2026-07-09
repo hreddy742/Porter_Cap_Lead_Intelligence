@@ -166,7 +166,7 @@ def test_full_pipeline_flow_correct_order():
         call_order.append(f"signals:{eid}")
         return [_make_signal()]
 
-    def fake_score(cid, db):
+    def fake_score(cid, db, ofac_cache=None, ofac_stats=None):
         call_order.append(f"score:{cid}")
         return {"scored": True}
 
