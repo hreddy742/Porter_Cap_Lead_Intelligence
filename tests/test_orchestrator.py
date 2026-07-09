@@ -30,6 +30,7 @@ import uuid
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy.exc import OperationalError
 
 from app.db.models import (
     Company,
@@ -40,7 +41,12 @@ from app.db.models import (
     SourceRegistry,
     SourceRun,
 )
-from app.pipeline.orchestrator import run_pipeline
+from app.pipeline.orchestrator import (
+    BATCH_COMMIT_SIZE,
+    MAX_RETRIES,
+    _commit_batch,
+    run_pipeline,
+)
 
 # ─── Patch-target constants ────────────────────────────────────────────────────
 
@@ -52,6 +58,10 @@ _EXTRACT = f"{_MOD}.extract_evidence"
 _RESOLVE = f"{_MOD}.resolve_company_for_evidence"
 _SIGNALS = f"{_MOD}.detect_signals_for_evidence"
 _SCORE = f"{_MOD}.score_company"
+
+
+def _operational_error() -> OperationalError:
+    return OperationalError("statement", {}, Exception("Software caused connection abort"))
 
 
 # ─── Object builders ──────────────────────────────────────────────────────────
@@ -539,3 +549,136 @@ def test_quarantine_count_persisted_to_pipeline_run():
     assert result["quarantine_count"] == 7
     pr = _find_added_obj(db, PipelineRun)
     assert pr.quarantine_count == 7
+
+
+# ─── Batch-commit orphan-elimination tests ────────────────────────────────────
+#
+# Before this fix, evidence/resolution/signal/score work for an entire source
+# run committed once at the very end of Step 3. A source with 262K raw events
+# (already committed by its connector) could run for 22+ hours with zero
+# commits — killing the process anywhere in that window permanently orphaned
+# every one of those raw events (no evidence, no signals ever committed).
+# These tests prove: (1) _commit_batch commits every batch independently,
+# (2) a dropped connection mid-batch replays only that batch, and (3) a batch
+# that fails after all retries leaves earlier, already-committed batches
+# intact while contributing nothing to the summary itself — no partial/
+# orphaned state is ever counted as done.
+
+
+def test_commit_batch_commits_once_on_success():
+    db = MagicMock()
+    log = MagicMock()
+    raw_events = [_make_raw_event(), _make_raw_event()]
+
+    with patch(_EXTRACT, return_value=[]):
+        batch_summary = _commit_batch(db, log, raw_events)
+
+    assert db.commit.call_count == 1
+    assert db.rollback.call_count == 0
+    assert batch_summary["evidence_items_created"] == 0
+
+
+def test_commit_batch_replays_batch_after_dropped_connection():
+    """
+    A dropped connection on the first commit attempt must roll back, then
+    replay processing for the same batch (not skip it, not double-count it)
+    before committing again.
+    """
+    db = MagicMock()
+    db.commit.side_effect = [_operational_error(), None]
+    log = MagicMock()
+    raw_events = [_make_raw_event(), _make_raw_event()]
+
+    extract_calls: list[uuid.UUID] = []
+
+    def fake_extract(eid, db_arg):
+        extract_calls.append(eid)
+        return []
+
+    with patch(_EXTRACT, side_effect=fake_extract), \
+         patch(f"{_MOD}.time.sleep"):
+        batch_summary = _commit_batch(db, log, raw_events)
+
+    assert db.commit.call_count == 2
+    assert db.rollback.call_count == 1
+    # Processing replayed for the whole batch, not skipped or duplicated in the result.
+    assert extract_calls == [raw_events[0].id, raw_events[1].id] * 2
+    assert batch_summary["evidence_items_created"] == 0
+
+
+def test_commit_batch_raises_after_retries_exhausted():
+    db = MagicMock()
+    db.commit.side_effect = lambda: (_ for _ in ()).throw(_operational_error())
+    log = MagicMock()
+    raw_events = [_make_raw_event()]
+
+    with patch(_EXTRACT, return_value=[]), \
+         patch(f"{_MOD}.time.sleep"):
+        with pytest.raises(OperationalError):
+            _commit_batch(db, log, raw_events)
+
+    assert db.commit.call_count == MAX_RETRIES + 1
+    assert db.rollback.call_count == MAX_RETRIES + 1
+
+
+def test_interrupted_run_leaves_zero_orphans():
+    """
+    Simulate a source with two batches: the first batch commits successfully,
+    the second batch's connection is permanently dead (every retry attempt
+    fails). The run must end up "failed" for that source, but the summary
+    must reflect exactly the first batch's committed work — nothing from the
+    doomed second batch is ever counted, proving there is no window where a
+    raw event's evidence/signal/score is credited without actually having
+    been committed.
+    """
+    source = _make_source("usaspending")
+    n_events = 2 * BATCH_COMMIT_SIZE
+    raw_events = [_make_raw_event() for _ in range(n_events)]
+
+    db = MagicMock()
+    db.execute.return_value.scalar_one_or_none.return_value = None  # no stale run
+
+    call_count = {"n": 0}
+
+    def commit_side_effect():
+        call_count["n"] += 1
+        n = call_count["n"]
+        # Calls: 1=pipeline_run create, 2=source_run create, 3=batch1 (ok),
+        # 4..(4+MAX_RETRIES)=batch2 attempts (all fail), rest succeed.
+        if 4 <= n <= 4 + MAX_RETRIES:
+            raise _operational_error()
+
+    db.commit.side_effect = commit_side_effect
+
+    def fake_extract(eid, db_arg):
+        return [_make_evidence()]
+
+    def fake_resolve(eid, db_arg):
+        return _make_company()
+
+    def fake_signals(eid, db_arg):
+        return [_make_signal()]
+
+    with patch(_LOAD_SOURCES, return_value=[source]), \
+         patch(_GET_EVENTS, return_value=raw_events), \
+         patch(_CONNECTOR, return_value=MagicMock()), \
+         patch(_EXTRACT, side_effect=fake_extract), \
+         patch(_RESOLVE, side_effect=fake_resolve), \
+         patch(_SIGNALS, side_effect=fake_signals), \
+         patch(_SCORE, return_value={"scored": True, "tier": "warm"}), \
+         patch(f"{_MOD}.time.sleep"):
+        result = run_pipeline(db)
+
+    assert result["status"] == "failed"
+    assert result["sources_failed"] == 1
+    assert result["sources_succeeded"] == 0
+    # Only batch 1's work is reflected — batch 2 contributed nothing.
+    assert result["raw_events_processed"] == BATCH_COMMIT_SIZE
+    assert result["evidence_items_created"] == BATCH_COMMIT_SIZE
+    assert result["companies_resolved"] == BATCH_COMMIT_SIZE
+    assert result["signals_created"] == BATCH_COMMIT_SIZE
+    assert result["companies_scored"] == BATCH_COMMIT_SIZE
+    assert result["total_warm"] == BATCH_COMMIT_SIZE
+
+    source_run_obj = _find_added_obj(db, SourceRun)
+    assert source_run_obj.status == "failed"
