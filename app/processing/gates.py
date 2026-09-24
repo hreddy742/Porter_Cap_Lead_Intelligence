@@ -107,7 +107,7 @@ def gate_11_ofac_screening(
 
     Returns FAIL if match found (exact or partial ≥ 8 chars).
     Returns PASS with is_warning=True if SDN file not found (gate disabled).
-    Confirmed by John Cox Miller — Porter Capital compliance requirement, June 2026.
+    Porter Capital compliance requirement, confirmed June 2026.
 
     `cache` is an optional dict the caller scopes to a single pipeline run —
     the same company name recurs across sources (SBA loan + USASpending award,
@@ -218,7 +218,7 @@ def gate_12_academic_institution(company_name: str) -> AcademicResult:
     or the "institute ... studies" research-institute pattern.
     Ambiguous names (e.g. "Institute for Defense Analyses") default to PASS —
     a human reviewer can always reject manually via the review UI.
-    Confirmed by John Cox Miller — Porter Capital compliance requirement, July 7 2026.
+    Porter Capital compliance requirement, confirmed July 7 2026.
     """
     if not company_name:
         return AcademicResult(passed=True)
@@ -291,7 +291,7 @@ def gate_13_social_service_nonprofit(
 
     Returns FAIL if naics_code is in _SOCIAL_SERVICE_NAICS or company_name
     contains a _SOCIAL_SERVICE_KEYWORDS phrase.
-    Confirmed by John Cox Miller — Porter Capital compliance requirement, July 2026.
+    Porter Capital compliance requirement, confirmed July 2026.
     """
     if naics_code and naics_code[:6] in _SOCIAL_SERVICE_NAICS:
         return SocialServiceResult(
@@ -310,7 +310,7 @@ def gate_13_social_service_nonprofit(
     return SocialServiceResult(passed=True)
 
 
-# Prefixes for the soft-flag (Phase 2B ICP policy, confirmed by John Cox Miller June 24 2026).
+# Prefixes for the soft-flag (Phase 2B ICP policy, confirmed June 24 2026).
 # Leads in these sectors are scored and stored normally but hidden from sales by default.
 _EXCLUDED_NAICS_PREFIXES: frozenset[str] = frozenset({
     "11",  # Agriculture
@@ -321,7 +321,7 @@ _EXCLUDED_NAICS_PREFIXES: frozenset[str] = frozenset({
     "62",  # Health Care and Social Assistance
     "71",  # Arts, Entertainment, Recreation
     "92",  # Public Administration
-    # Source: John Cox Miller, Porter Capital, June 24 2026
+    # Source: Porter Capital ICP policy, June 24 2026
 })
 
 _EXCLUDED_INDUSTRY_KEYWORDS = frozenset({"finance", "bank", "lender", "education", "government"})
@@ -592,8 +592,8 @@ def flag_excluded_sector(
             lead_candidate.sector_excluded = True
             lead_candidate.sector_excluded_reason = (
                 f"NAICS {company.naics_code} is in excluded "
-                f"sector {prefix} per Porter ICP policy "
-                f"confirmed by John Cox Miller June 24 2026"
+                f"sector {prefix} per Porter ICP policy, "
+                f"confirmed June 24 2026"
             )
             db.flush()
             logger.info(
