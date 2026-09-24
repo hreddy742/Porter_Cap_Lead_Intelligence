@@ -150,8 +150,8 @@ def _extract_prime_award_evidence(
     }
 
     # Award type determines claim_supported: contracts (A-D) -> CONTRACT_AWARD,
-    # grants (04/05) -> FEDERAL_GRANT, IDVs -> IDV_AWARD. Fixed per John Cox
-    # Miller, Porter Capital, July 2026.
+    # grants (04/05) -> FEDERAL_GRANT, IDVs -> IDV_AWARD. Fixed per Porter
+    # Capital policy, July 2026.
     claim_supported = classify_award_type(payload.get("Award Type"))
 
     freshness = _compute_freshness(action_date)
