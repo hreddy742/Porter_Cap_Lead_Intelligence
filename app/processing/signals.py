@@ -48,7 +48,7 @@ _HANDLED_CLAIMS = frozenset({
 })
 
 # SBA signal strengths are fixed by loan status, not derived from loan amount.
-# Confirmed by John Cox Miller, Porter Capital, June 25 2026 and July 2026.
+# Confirmed by Porter Capital, June 25 2026 and July 2026.
 _SBA_CLAIM_STRENGTHS: dict[str, str] = {
     _CLAIM_SBA_LOAN_PIF: "strong",     # paid-off = proven financing need, now scaling
     _CLAIM_SBA_LOAN_ACTIVE: "medium",  # active lien on receivables, needs qualification
