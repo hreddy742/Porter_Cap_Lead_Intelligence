@@ -237,7 +237,6 @@ docs/
 
 ## See also
 
-- `CLAUDE.md` — Claude Code project memory (read before each AI coding session)
 - `docs/PHASE_1_RUNBOOK.md` — daily/manual run sequence and troubleshooting
 - `docs/PHASE_1_ACCEPTANCE_CHECKLIST.md` — Phase 1 acceptance criteria
 - `docs/PHASE_1_LIMITATIONS.md` — what Phase 1 intentionally does not do
