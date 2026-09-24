@@ -57,22 +57,22 @@ _AR_HEAVY_NAICS = ("54", "56", "33", "48", "23", "62")
 # SUBCONTRACT_AWARD is emitted by the usaspending_subawards connector.
 # FEDERAL_GRANT (project grants/cooperative agreements) and IDV_AWARD (indefinite
 # delivery vehicles) score identically to CONTRACT_AWARD for now — AI will refine
-# later. Added per John Cox Miller, Porter Capital, July 2026.
+# later. Added per Porter Capital policy, July 2026.
 _AWARD_SIGNAL_TYPES = frozenset(
     {"CONTRACT_AWARD", "SUBCONTRACT_AWARD", "FEDERAL_GRANT", "IDV_AWARD"}
 )
 
 # SBA signal types — bonuses scale with freshness (loan recency).
-# Max values confirmed by John Cox Miller, Porter Capital, June 25 2026:
+# Max values confirmed by Porter Capital, June 25 2026:
 #   PIF max = 8, Active max = 4 (both capped by why_now ceiling of 30).
 # SBA_LOAN_PENDING (COMMIT status — just approved) is a flat +10, added
-# per John Cox Miller, Porter Capital, July 2026.
+# per Porter Capital policy, July 2026.
 _SBA_SIGNAL_TYPES = frozenset({"SBA_LOAN_PIF", "SBA_LOAN_ACTIVE"})
 _SBA_LOAN_PENDING_TYPE = "SBA_LOAN_PENDING"
 _SBA_LOAN_PENDING_BONUS = 10
 
 # SBIR/STTR grant signal types.
-# Bonuses confirmed by John Cox Miller, Porter Capital, July 2026:
+# Bonuses confirmed by Porter Capital, July 2026:
 #   Phase II/III (strong) → +6, Phase I (medium) → +3
 _SBIR_SIGNAL_TYPES = frozenset({"SBIR_GRANT"})
 
@@ -94,7 +94,7 @@ def _sba_why_now_points(signal_type: str, freshness: float) -> int:
     Freshness 0.0–1.0 is computed from loan approval_date over a 5-year window,
     so 2022 loans score ~0.1 and 2026 loans score ~1.0.
 
-    Max values (freshness=1.0): PIF=8, Active=4 — confirmed by John Cox Miller.
+    Max values (freshness=1.0): PIF=8, Active=4 — confirmed by Porter Capital.
     Using freshness tiers introduces score variation across the loan cohort.
     """
     if signal_type == "SBA_LOAN_PIF":
@@ -171,7 +171,7 @@ def score_company(
     Returns a dict:
         scored              bool
         company_id          UUID
-        gate_result         dict   — full gate result (always present)
+        gate_result          dict   — full gate result (always present)
         total_score         int | None
         tier                str | None
         component_breakdown dict   — component-level detail including evidence_ids
@@ -298,15 +298,15 @@ def score_company(
             wn_evidence.append(best_sba.evidence_id)
 
     # SBA_LOAN_PENDING why_now bonus: flat +10 — a just-approved (COMMIT)
-    # loan means the company needs working capital now. Added per John Cox
-    # Miller, Porter Capital, July 2026.
+    # loan means the company needs working capital now. Added per Porter
+    # Capital policy, July 2026.
     pending_signals = [s for s in signals if s.signal_type == _SBA_LOAN_PENDING_TYPE]
     if pending_signals:
         wn_points = min(30, wn_points + _SBA_LOAN_PENDING_BONUS)
         wn_evidence.append(pending_signals[0].evidence_id)
 
     # SBIR/STTR why_now bonus: Phase II/III (strong) → +6, Phase I (medium) → +3.
-    # Confirmed by John Cox Miller, Porter Capital, July 2026.
+    # Confirmed by Porter Capital, July 2026.
     sbir_signals = [s for s in signals if s.signal_type in _SBIR_SIGNAL_TYPES]
     if sbir_signals:
         best_sbir = max(sbir_signals, key=lambda s: float(s.freshness_score or 0))
